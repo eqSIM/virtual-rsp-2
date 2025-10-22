@@ -1,0 +1,132 @@
+Using PC/SC reader interface
+Reading ...
+Autodetected card type: Fairwaves-SIM
+ICCID: 8988219000000117833
+IMSI: 001010000000111
+GID1: ffffffffffffffff
+GID2: ffffffffffffffff
+SMSP: e1ffffffffffffffffffffffff0581005155f5ffffffffffff000000ffffffffffffffffffffffffffff
+SPN: Fairwaves
+Show in HPLMN: False
+Hide in OPLMN: False
+PLMNsel: ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+PLMNwAcT:
+	ffffff0000 # unused
+	ffffff0000 # unused
+	ffffff0000 # unused
+	ffffff0000 # unused
+	ffffff0000 # unused
+	ffffff0000 # unused
+	ffffff0000 # unused
+	ffffff0000 # unused
+
+OPLMNwAcT:
+	ffffff0000 # unused
+	ffffff0000 # unused
+	ffffff0000 # unused
+	ffffff0000 # unused
+	ffffff0000 # unused
+	ffffff0000 # unused
+	ffffff0000 # unused
+	ffffff0000 # unused
+
+HPLMNAcT:
+	00f110ffff # MCC: 001 MNC: 01 AcT: E-UTRAN NB-S1, E-UTRAN WB-S1, EC-GSM-IoT, GSM, GSM COMPACT, NG-RAN, UTRAN, cdma2000 1xRTT, cdma2000 HRPD
+	ffffff0000 # unused
+	ffffff0000 # unused
+	ffffff0000 # unused
+	ffffff0000 # unused
+	ffffff0000 # unused
+	ffffff0000 # unused
+	ffffff0000 # unused
+
+ACC: 0008
+MSISDN: Not available
+Administrative data: 00000002
+	MS operation mode: normal
+	Ciphering Indicator: disabled
+SIM Service Table: ff3cc3ff030fff0f000fff03f0c0
+	Service 1 - CHV1 disable function
+	Service 2 - Abbreviated Dialling Numbers (ADN)
+	Service 3 - Fixed Dialling Numbers (FDN)
+	Service 4 - Short Message Storage (SMS)
+	Service 5 - Advice of Charge (AoC)
+	Service 6 - Capability Configuration Parameters (CCP)
+	Service 7 - PLMN selector
+	Service 8 - RFU
+	Service 11 - Extension2
+	Service 12 - SMS Parameters
+	Service 13 - Last Number Dialled (LND)
+	Service 14 - Cell Broadcast Message Identifier
+	Service 17 - Service Provider Name
+	Service 18 - Service Dialling Numbers (SDN)
+	Service 23 - enhanced Multi-Level Precedence and Pre-emption Service
+	Service 24 - Automatic Answer for eMLPP
+	Service 25 - Data download via SMS-CB
+	Service 26 - Data download via SMS-PP
+	Service 27 - Menu selection
+	Service 28 - Call control
+	Service 29 - Proactive SIM
+	Service 30 - Cell Broadcast Message Identifier Ranges
+	Service 31 - Barred Dialling Numbers (BDN)
+	Service 32 - Extension4
+	Service 33 - De-personalization Control Keys
+	Service 34 - Co-operative Network List
+	Service 41 - USSD string data object supported in Call Control
+	Service 42 - RUN AT COMMAND command
+	Service 43 - User controlled PLMN Selector with Access Technology
+	Service 44 - Operator controlled PLMN Selector with Access Technology
+	Service 49 - MExE
+	Service 50 - Reserved and shall be ignored
+	Service 51 - PLMN Network Name
+	Service 52 - Operator PLMN List
+	Service 53 - Mailbox Dialling Numbers
+	Service 54 - Message Waiting Indication Status
+	Service 55 - Call Forwarding Indication Status
+	Service 56 - Service Provider Display Information
+	Service 57 - Multimedia Messaging Service (MMS)
+	Service 58 - Extension 8
+	Service 59 - MMS User Connectivity Parameters
+
+FPLMN:
+	ffffff # unused
+	ffffff # unused
+	ffffff # unused
+	ffffff # unused
+	ffffff # unused
+	ffffff # unused
+	ffffff # unused
+	ffffff # unused
+	ffffff # unused
+	ffffff # unused
+
+USIM Service Table: 01ea1ffc21360480010000
+	Service 1 - Local Phone Book
+	Service 10 - Short Message Storage (SMS)
+	Service 12 - Short Message Service Parameters (SMSP)
+	Service 14 - Capability Configuration Parameters 2 (CCP2)
+	Service 15 - Cell Broadcast Message Identifier
+	Service 16 - Cell Broadcast Message Identifier Ranges
+	Service 17 - Group Identifier Level 1
+	Service 18 - Group Identifier Level 2
+	Service 19 - Service Provider Name
+	Service 20 - User controlled PLMN selector with Access Technology
+	Service 21 - MSISDN
+	Service 27 - GSM Access
+	Service 28 - Data download via SMS-PP
+	Service 29 - Data download via SMS-CB
+	Service 30 - Call Control by USIM
+	Service 31 - MO-SMS Control by USIM
+	Service 32 - RUN AT COMMAND command
+	Service 33 - shall be set to 1
+	Service 38 - GSM security context
+	Service 42 - Operator controlled PLMN selector with Access Technology
+	Service 43 - HPLMN selector with Access Technology
+	Service 45 - PLMN Network Name
+	Service 46 - Operator PLMN List
+	Service 51 - Service Provider Display Information
+	Service 64 - VGCS security
+	Service 65 - VBS security
+
+Done !
+
