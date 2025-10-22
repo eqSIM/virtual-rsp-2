@@ -70,6 +70,11 @@ pip3 install -r requirements.txt
 
 # Build the project
 make -j$(nproc)
+
+# Fix driver symlink issue (if needed)
+# The lpac binary looks for drivers in build/lpac/src/driver/
+# If you get "No APDU driver found", create symlink:
+cd build/lpac/src && ln -s ../driver driver
 ```
 
 ### Running the Test Suite

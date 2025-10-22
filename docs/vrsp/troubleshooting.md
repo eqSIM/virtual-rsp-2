@@ -164,6 +164,29 @@ tail -f /tmp/osmo-smdpp-test.log
 # Check signature algorithm
 ```
 
+**"No APDU driver found"**
+```bash
+# The lpac binary looks for driver libraries in a driver/ subdirectory
+# relative to its own location. This is a common build configuration issue.
+
+# Check if drivers exist
+ls -la build/lpac/driver/
+
+# If drivers exist but lpac can't find them, create symlink in src directory
+cd build/lpac/src
+ln -s ../driver driver
+
+# Verify lpac can now find drivers
+./lpac driver list
+
+# Expected output:
+# {"type":"driver","payload":{"LPAC_APDU":["socket","stdio","pcsc"],"LPAC_HTTP":["curl","stdio"]}}
+
+# If symlink doesn't work, check DYLD_LIBRARY_PATH
+export DYLD_LIBRARY_PATH="$PWD/../../lpac/driver:$PWD/../../lpac/euicc:$PWD/../../lpac/utils"
+./lpac driver list
+```
+
 ## Authentication Problems
 
 ### Certificate Chain Validation

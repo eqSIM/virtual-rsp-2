@@ -302,6 +302,22 @@ grep EID v-euicc/src/euicc_state.c
 openssl verify -CAfile ../CI/ica.pem cert.pem
 ```
 
+**"No APDU driver found"**
+```bash
+# The lpac binary looks for driver libraries in a driver/ subdirectory
+# relative to its own location. If drivers are not found, create a symlink.
+
+# Check if drivers exist
+ls -la build/lpac/driver/
+
+# If drivers exist but lpac can't find them, create symlink in src directory
+cd build/lpac/src
+ln -s ../driver driver
+
+# Verify lpac can now find drivers
+./lpac driver list
+```
+
 ## Next Steps
 
 After successful setup, proceed to:

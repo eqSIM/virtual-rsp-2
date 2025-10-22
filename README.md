@@ -82,7 +82,12 @@ python3 demo_logging.py
 cmake -B build
 cmake --build build
 
-# 2. Run the provided test script
+# 2. Fix driver symlink issue (if needed)
+# The lpac binary looks for drivers in build/lpac/src/driver/
+# If drivers are not found, create symlink:
+cd build/lpac/src && ln -s ../driver driver
+
+# 3. Run the provided test script
 ./test-virtual-euicc.sh
 ```
 
