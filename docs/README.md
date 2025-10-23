@@ -106,7 +106,7 @@ virtual-rsp/
 
 ## 📚 References
 
-- [GSMA SGP.22 v2.5 Specification](https://www.gsma.com/newsroom/wp-content/uploads/GSMA-SGP.22-v3.0.pdf)
+- [GSMA eSIM Specification](https://www.gsma.com/solutions-and-impact/technologies/esim/esim-specification/)
 - [Osmocom pySim Project](https://osmocom.org/projects/pysim)
 - [GlobalPlatform Card Specification](https://www.globalplatform.org/)
 
@@ -125,7 +125,7 @@ virtual-rsp/
 For issues, questions, or contributions, please refer to:
 - [Troubleshooting Guide](vrsp/troubleshooting.md)
 - [Development Guide](vrsp/development.md)
-- [GitHub Repository](https://github.com/osmocom/virtual-rsp)
+- [GitHub Repository](https://github.com/Lavelliane/virtual-rsp-2)
 
 ---
 

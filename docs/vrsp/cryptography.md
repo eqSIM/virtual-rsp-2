@@ -323,7 +323,7 @@ BF37 (ProfileInstallationResult) {
 
 ## References
 
-- **SGP.22 v2.5**: GSMA RSP Technical Specification
+- **[GSMA eSIM Specification](https://www.gsma.com/solutions-and-impact/technologies/esim/esim-specification/)**: SGP.22 v2.5 RSP Technical Specification
 - **TR-03111**: ECDSA Signature Format
 - **GlobalPlatform Card Spec v2.3**: Secure Channel Protocol
 - **NIST P-256**: secp256r1 elliptic curve parameters

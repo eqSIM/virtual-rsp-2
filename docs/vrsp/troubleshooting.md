@@ -618,7 +618,7 @@ tshark -r apdu_capture.pcap -Y "tcp.port == 8765"
 
 ### Community Support
 
-- **GitHub Issues**: [Project Issues](https://github.com/osmocom/virtual-rsp/issues)
+- **GitHub Issues**: [Project Issues](https://github.com/Lavelliane/virtual-rsp-2/issues)
 - **Documentation**: [GSMA SGP.22 Specification](https://www.gsma.com/newsroom/wp-content/uploads/GSMA-SGP.22-v3.0.pdf)
 - **Standards**: [ETSI TS 102 221](https://www.etsi.org/deliver/etsi_ts/102200_102299/102221/16.00.00_60/ts_102221v160000p.pdf)
 

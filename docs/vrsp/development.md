@@ -58,7 +58,7 @@ virtual-rsp/
 
 ```bash
 # Clone repository
-git clone https://github.com/osmocom/virtual-rsp.git
+git clone https://github.com/Lavelliane/virtual-rsp-2.git
 cd virtual-rsp
 
 # Create build directory

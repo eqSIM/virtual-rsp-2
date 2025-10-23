@@ -61,7 +61,7 @@ The Virtual RSP project implements a **complete and working** GSMA SGP.22 compli
 
 ```bash
 # Required tools
-git clone https://github.com/osmocom/virtual-rsp.git
+git clone https://github.com/Lavelliane/virtual-rsp-2.git
 cd virtual-rsp
 
 # Install dependencies
@@ -121,4 +121,8 @@ cd build/lpac/src && ln -s ../driver driver
 
 ---
 
-**Built with**: [Docsify](https://docsify.js.org/) | **Standards**: [GSMA SGP.22](https://www.gsma.com/newsroom/wp-content/uploads/GSMA-SGP.22-v3.0.pdf)
+**Built with**: [Docsify](https://docsify.js.org/)## 📚 References
+
+- [GSMA eSIM Specification](https://www.gsma.com/solutions-and-impact/technologies/esim/esim-specification/)
+- [Osmocom pySim Project](https://osmocom.org/projects/pysim)
+- [GlobalPlatform Card Specification](https://www.globalplatform.org/)

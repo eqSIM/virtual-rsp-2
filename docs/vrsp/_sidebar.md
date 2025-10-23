@@ -18,5 +18,5 @@
   - [❓ Troubleshooting](troubleshooting)
 
 - **External Links**
-  - [📋 GSMA SGP.22 Specification](https://www.gsma.com/newsroom/wp-content/uploads/GSMA-SGP.22-v3.0.pdf)
-  - [🔗 GitHub Repository](https://github.com/osmocom/virtual-rsp)
+  - [📋 GSMA eSIM Specification](https://www.gsma.com/solutions-and-impact/technologies/esim/esim-specification/)
+  - [🔗 GitHub Repository](https://github.com/Lavelliane/virtual-rsp-2)

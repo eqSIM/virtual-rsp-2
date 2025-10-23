@@ -37,7 +37,7 @@ npm install -g docsify
 ### Source Code
 
 ```bash
-git clone https://github.com/osmocom/virtual-rsp.git
+git clone https://github.com/Lavelliane/virtual-rsp-2.git
 cd virtual-rsp
 ```
 
