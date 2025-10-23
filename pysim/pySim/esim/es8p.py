@@ -217,8 +217,9 @@ class BoundProfilePackage(ProfilePackage):
         # 'sequenceOf86'
         bpp_seq += encode_seq(0xa3, self.ppp.encoded)
 
-        # return raw BPP command sequence for lpac compatibility
-        return bpp_seq
+        # Wrap in BF36 (BoundProfilePackage) for SGP.22 compliance
+        # lpac expects: BF36 { BF23 ... A0 ... A1 ... A2 ... A3 ... }
+        return bertlv_encode_tag(0xBF36) + bertlv_encode_len(len(bpp_seq)) + bpp_seq
 
     def decode(self, euicc_ot, eid: str, bpp_bin: bytes):
         """Decode a BPP into the PPP and subsequently UPP. This is what happens inside an eUICC."""

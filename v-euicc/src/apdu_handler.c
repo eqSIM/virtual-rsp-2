@@ -388,6 +388,71 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
     }
 
     fprintf(stderr, "[v-euicc] ES10x command tag: %04X, len=%u\n", tag, command_len);
+    
+    // SGP.22 Section 3.1.3.3: lpac sends BPP commands wrapped in BF36
+    // Handle BF36 wrapper by extracting the inner command
+    if (tag == 0xBF36) {
+        fprintf(stderr, "[v-euicc] BF36 wrapper detected (len=%u), extracting inner BPP command\n", command_len);
+        
+        // Dump first 20 bytes for debugging
+        fprintf(stderr, "[v-euicc] BF36 data: ");
+        for (uint32_t i = 0; i < command_len && i < 20; i++) {
+            fprintf(stderr, "%02X ", command[i]);
+        }
+        fprintf(stderr, "...\n");
+        
+        // Skip BF36 tag (2 bytes) and length field to get to inner command
+        const uint8_t *inner_cmd = command + 2;
+        uint32_t inner_len = command_len - 2;
+        
+        // Parse length field (assuming < 128 bytes length, or extended length)
+        if (inner_len > 0) {
+            uint8_t len_byte = inner_cmd[0];
+            fprintf(stderr, "[v-euicc] BF36 length byte: 0x%02X\n", len_byte);
+            
+            if (len_byte < 0x80) {
+                // Short form: skip 1 byte
+                inner_cmd += 1;
+                inner_len -= 1;
+                fprintf(stderr, "[v-euicc] BF36: Short length form\n");
+            } else if (len_byte == 0x81) {
+                // Long form with 1 length byte: skip 2 bytes
+                inner_cmd += 2;
+                inner_len -= 2;
+                fprintf(stderr, "[v-euicc] BF36: Long length form (1 byte)\n");
+            } else if (len_byte == 0x82) {
+                // Long form with 2 length bytes: skip 3 bytes
+                inner_cmd += 3;
+                inner_len -= 3;
+                fprintf(stderr, "[v-euicc] BF36: Long length form (2 bytes)\n");
+            }
+            
+            // Now parse the actual inner command tag
+            if (inner_len >= 2) {
+                tag = inner_cmd[0];
+                if ((tag & 0x1F) == 0x1F && inner_len >= 2) {
+                    tag = (tag << 8) | inner_cmd[1];
+                }
+                
+                // Update command pointer to inner command for processing
+                command = inner_cmd;
+                command_len = inner_len;
+                
+                fprintf(stderr, "[v-euicc] Inner BPP command tag: %04X, len=%u\n", tag, command_len);
+                
+                // Dump first 20 bytes of inner command
+                fprintf(stderr, "[v-euicc] Inner cmd data: ");
+                for (uint32_t i = 0; i < command_len && i < 20; i++) {
+                    fprintf(stderr, "%02X ", command[i]);
+                }
+                fprintf(stderr, "...\n");
+            } else {
+                fprintf(stderr, "[v-euicc] BF36: Inner command too short (%u bytes)\n", inner_len);
+            }
+        } else {
+            fprintf(stderr, "[v-euicc] BF36: Empty wrapper\n");
+        }
+    }
 
     switch (tag) {
     case 0xBF2E: { // GetEuiccChallengeRequest
@@ -931,6 +996,7 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
         
         // Add euiccOtpk (tag 0x5F49 = APPLICATION 73)
         // Generate a real EC key pair and use the public key
+        // SGP.22 Section 3.1.3.2: eUICC generates or reuses otPK.EUICC.ECKA key pair
         EVP_PKEY *otpk_keypair = generate_ec_keypair();
         uint8_t *euicc_otpk = NULL;
         uint32_t euicc_otpk_len = 0;
@@ -940,15 +1006,8 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
             if (!euicc_otpk || euicc_otpk_len != 65) {
                 fprintf(stderr, "[v-euicc] Failed to extract euiccOtpk public key\n");
                 if (euicc_otpk) free(euicc_otpk);
-                // Fallback to dummy key
-                euicc_otpk = malloc(65);
-                euicc_otpk_len = 65;
-                euicc_otpk[0] = 0x04;
-                for (int i = 1; i < 65; i++) {
-                    euicc_otpk[i] = (uint8_t)(rand() & 0xFF);
-                }
                 EVP_PKEY_free(otpk_keypair);
-                otpk_keypair = NULL;
+                return -1;
             } else {
                 fprintf(stderr, "[v-euicc] Generated valid euiccOtpk: ");
                 for (uint32_t i = 0; i < euicc_otpk_len && i < 8; i++) {
@@ -957,14 +1016,8 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
                 fprintf(stderr, "...\n");
             }
         } else {
-            fprintf(stderr, "[v-euicc] Failed to generate euiccOtpk keypair, using dummy\n");
-            // Fallback to dummy key
-            euicc_otpk = malloc(65);
-            euicc_otpk_len = 65;
-            euicc_otpk[0] = 0x04;
-            for (int i = 1; i < 65; i++) {
-                euicc_otpk[i] = (uint8_t)(rand() & 0xFF);
-            }
+            fprintf(stderr, "[v-euicc] Failed to generate euiccOtpk keypair\n");
+            return -1;
         }
 
         uint8_t *otpk_tlv = NULL;
@@ -977,12 +1030,25 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
             free(otpk_tlv);
         }
 
-        // Store the keypair for later use (if needed for key agreement)
-        if (otpk_keypair) {
-            // TODO: Store in state for later use
+        // Store the ephemeral key pair in state for session key derivation (SGP.22 Section 3.1.3.3)
+        // This is required for InitialiseSecureChannel to derive session keys
+        free(state->euicc_otpk);
+        state->euicc_otpk = euicc_otpk;  // Transfer ownership
+        state->euicc_otpk_len = euicc_otpk_len;
+        
+        // Extract and store the private key for ECKA
+        free(state->euicc_otsk);
+        state->euicc_otsk = extract_ec_private_key(otpk_keypair, &state->euicc_otsk_len);
+        if (!state->euicc_otsk || state->euicc_otsk_len != 32) {
+            fprintf(stderr, "[v-euicc] Failed to extract euiccOtsk private key\n");
             EVP_PKEY_free(otpk_keypair);
+            return -1;
         }
-        free(euicc_otpk);
+        
+        fprintf(stderr, "[v-euicc] Stored otPK.EUICC.ECKA (%u bytes) and otSK.EUICC.ECKA (%u bytes)\n",
+                state->euicc_otpk_len, state->euicc_otsk_len);
+        
+        EVP_PKEY_free(otpk_keypair);
         
         // Wrap in SEQUENCE (tag 0x30)
         uint8_t *euicc_signed2_tlv = NULL;
@@ -1380,31 +1446,247 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
     
     case 0xBF23: // InitialiseSecureChannelRequest (first BPP command)
     {
-        // Handle InitialiseSecureChannelRequest properly
+        // SGP.22 Section 3.1.3.3: Profile Installation
+        // InitialiseSecureChannelRequest ::= BF23 {
+        //     remoteOpId (80),
+        //     transactionId [0] (A0 80),
+        //     controlRefTemplate [6] (A6),
+        //     smdpOtpk [APPLICATION 73] (5F49),
+        //     smdpSign [APPLICATION 55] (5F37)
+        // }
         fprintf(stderr, "[v-euicc] InitialiseSecureChannelRequest (BF23) received, len=%u\n", command_len);
 
-        // Parse the InitialiseSecureChannelRequest
-        // It contains: transactionId, hostId, smdpOtpk, euiccOtpk
-        // For now, just acknowledge and continue
-        state->bpp_commands_received++;
-
-        // TEMP: Return simple success to bypass ProfileInstallationResult parsing issues
-        *response_len = 2;
-        *response = malloc(*response_len);
-        if (*response) {
-            (*response)[0] = 0x90;
-            (*response)[1] = 0x00;
+        // Extract transactionId to verify it matches PrepareDownload
+        // SGP.22 InitialiseSecureChannelRequest: BF23 { 82 <remoteOpId>, 80 <transactionId>, A6 <crt>, 5F49 <smdpOtpk>, 5F37 <smdpSign> }
+        const uint8_t *ptr = command;
+        uint32_t remaining = command_len;
+        uint8_t transaction_id_found[16];
+        uint8_t transaction_id_found_len = 0;
+        
+        // Skip BF23 tag and length to get to content
+        if (remaining > 4 && ptr[0] == 0xBF && ptr[1] == 0x23) {
+            ptr += 2;
+            remaining -= 2;
+            
+            // Skip length field
+            if (ptr[0] < 0x80) {
+                ptr += 1;
+                remaining -= 1;
+            } else if (ptr[0] == 0x81) {
+                ptr += 2;
+                remaining -= 2;
+            } else if (ptr[0] == 0x82) {
+                ptr += 3;
+                remaining -= 3;
+            }
         }
-        fprintf(stderr, "[v-euicc] BF23: Simple success response (bypassing ProfileInstallationResult)\n");
+        
+        // Now parse content: Look for transactionId tag 0x80
+        while (remaining > 2) {
+            if (ptr[0] == 0x80) {
+                uint8_t tid_len = ptr[1];
+                if (tid_len <= 16 && remaining >= 2 + tid_len) {
+                    memcpy(transaction_id_found, ptr + 2, tid_len);
+                    transaction_id_found_len = tid_len;
+                    fprintf(stderr, "[v-euicc] BF23: Found transactionID (%u bytes)\n", tid_len);
+                    break;
+                }
+            }
+            // Skip this TLV
+            uint8_t skip_len = ptr[1];
+            if (skip_len >= 0x80) break;  // Long form, stop
+            ptr += 2 + skip_len;
+            remaining -= 2 + skip_len;
+        }
+        
+        // Verify transactionId matches the one from PrepareDownload
+        if (transaction_id_found_len != state->transaction_id_len ||
+            memcmp(transaction_id_found, state->transaction_id, transaction_id_found_len) != 0) {
+            fprintf(stderr, "[v-euicc] BF23: TransactionID mismatch! Expected %u bytes, got %u bytes\n",
+                    state->transaction_id_len, transaction_id_found_len);
+            // Return error: Invalid Transaction ID (SGP.22 errorReason 0x03)
+            return -1;
+        }
+        fprintf(stderr, "[v-euicc] BF23: TransactionID verified\n");
+
+        // Extract smdpOtpk (SM-DP+ one-time public key, tag 0x5F49)
+        // Reset ptr to beginning of BF23 content (after tag/length)
+        ptr = command;
+        remaining = command_len;
+        uint8_t *smdp_otpk_data = NULL;
+        uint32_t smdp_otpk_len = 0;
+        
+        // Skip BF23 tag and length again
+        if (remaining > 4 && ptr[0] == 0xBF && ptr[1] == 0x23) {
+            ptr += 2;
+            remaining -= 2;
+            
+            // Skip length field
+            if (ptr[0] < 0x80) {
+                ptr += 1;
+                remaining -= 1;
+            } else if (ptr[0] == 0x81) {
+                ptr += 2;
+                remaining -= 2;
+            } else if (ptr[0] == 0x82) {
+                ptr += 3;
+                remaining -= 3;
+            }
+        }
+        
+        // Look for smdpOtpk tag 0x5F49
+        while (remaining > 3) {
+            if (ptr[0] == 0x5F && ptr[1] == 0x49) {
+                uint8_t len = ptr[2];
+                if (len < 0x80 && remaining >= 3 + len) {
+                    smdp_otpk_len = len;
+                    smdp_otpk_data = malloc(smdp_otpk_len);
+                    if (smdp_otpk_data) {
+                        memcpy(smdp_otpk_data, ptr + 3, smdp_otpk_len);
+                        fprintf(stderr, "[v-euicc] BF23: Extracted smdpOtpk (%u bytes)\n", smdp_otpk_len);
+                    }
+                    break;
+                }
+            }
+            // Skip current TLV
+            uint8_t skip_len = ptr[1];
+            if (skip_len >= 0x80) {
+                ptr++;
+                remaining--;
+            } else {
+                ptr += 2 + skip_len;
+                remaining -= 2 + skip_len;
+            }
+        }
+        
+        if (!smdp_otpk_data || smdp_otpk_len != 65) {
+            fprintf(stderr, "[v-euicc] BF23: Failed to extract smdpOtpk or invalid length\n");
+            free(smdp_otpk_data);
+            return -1;
+        }
+        
+        // Store SM-DP+ public key for later use
+        free(state->smdp_otpk);
+        state->smdp_otpk = smdp_otpk_data;
+        state->smdp_otpk_len = smdp_otpk_len;
+        
+        // Derive session keys using ECKA (SGP.22 Annex G)
+        if (!state->euicc_otsk || state->euicc_otsk_len != 32) {
+            fprintf(stderr, "[v-euicc] BF23: eUICC ephemeral private key not available\n");
+            return -1;
+        }
+        
+        if (derive_session_keys_ecka(state->euicc_otsk, state->euicc_otsk_len,
+                                     state->smdp_otpk, state->smdp_otpk_len,
+                                     state->session_key_enc, state->session_key_mac) < 0) {
+            fprintf(stderr, "[v-euicc] BF23: Session key derivation failed\n");
+            return -1;
+        }
+        
+        state->session_keys_derived = 1;
+        state->bpp_commands_received++;
+        fprintf(stderr, "[v-euicc] BF23: Session keys derived, secure channel established\n");
+
+        // Build ProfileInstallationResult with success
+        // SGP.22: Even intermediate BPP commands must return ProfileInstallationResult
+        uint8_t pir_buf[256];
+        uint8_t *pir_ptr = pir_buf;
+        uint32_t pir_len = 0;
+        
+        // transactionId (tag 0x80)
+        uint8_t *tid_tlv = NULL;
+        uint32_t tid_tlv_len = 0;
+        build_tlv(&tid_tlv, &tid_tlv_len, 0x80, state->transaction_id, state->transaction_id_len);
+        if (tid_tlv) {
+            memcpy(pir_ptr, tid_tlv, tid_tlv_len);
+            pir_ptr += tid_tlv_len;
+            pir_len += tid_tlv_len;
+            free(tid_tlv);
+        }
+        
+        // notificationMetadata BF2F { seqNumber (80) }
+        uint8_t nm_buf[8];
+        uint8_t seq_num = 0;  // Intermediate command
+        uint8_t *seq_tlv = NULL;
+        uint32_t seq_tlv_len = 0;
+        build_tlv(&seq_tlv, &seq_tlv_len, 0x80, &seq_num, 1);
+        uint8_t *nm_tlv = NULL;
+        uint32_t nm_tlv_len = 0;
+        if (seq_tlv) {
+            build_tlv(&nm_tlv, &nm_tlv_len, 0xBF2F, seq_tlv, seq_tlv_len);
+            free(seq_tlv);
+        }
+        if (nm_tlv) {
+            memcpy(pir_ptr, nm_tlv, nm_tlv_len);
+            pir_ptr += nm_tlv_len;
+            pir_len += nm_tlv_len;
+            free(nm_tlv);
+        }
+        
+        // smdpOid (dummy OID for now)
+        uint8_t dummy_oid[] = {0x06, 0x03, 0x04, 0x00, 0x7F};  // Dummy OID
+        memcpy(pir_ptr, dummy_oid, sizeof(dummy_oid));
+        pir_ptr += sizeof(dummy_oid);
+        pir_len += sizeof(dummy_oid);
+        
+        // finalResult: successResult A2 { A0 {} }
+        uint8_t success_result[] = {0xA2, 0x02, 0xA0, 0x00};  // A2 { A0 {} }
+        memcpy(pir_ptr, success_result, sizeof(success_result));
+        pir_len += sizeof(success_result);
+        
+        // Wrap in ProfileInstallationResultData (BF27)
+        uint8_t *pir_data_tlv = NULL;
+        uint32_t pir_data_tlv_len = 0;
+        build_tlv(&pir_data_tlv, &pir_data_tlv_len, 0xBF27, pir_buf, pir_len);
+        
+        // Build ProfileInstallationResult (BF37) with dummy signature
+        uint8_t pir_final_buf[512];
+        uint8_t *pir_final_ptr = pir_final_buf;
+        uint32_t pir_final_len = 0;
+        
+        if (pir_data_tlv) {
+            memcpy(pir_final_ptr, pir_data_tlv, pir_data_tlv_len);
+            pir_final_ptr += pir_data_tlv_len;
+            pir_final_len += pir_data_tlv_len;
+            free(pir_data_tlv);
+        }
+        
+        // Add dummy euiccSignPIR (tag 0x5F37, 64 bytes)
+        uint8_t dummy_sig[64] = {0};
+        uint8_t *sig_tlv = NULL;
+        uint32_t sig_tlv_len = 0;
+        build_tlv(&sig_tlv, &sig_tlv_len, 0x5F37, dummy_sig, sizeof(dummy_sig));
+        if (sig_tlv) {
+            memcpy(pir_final_ptr, sig_tlv, sig_tlv_len);
+            pir_final_len += sig_tlv_len;
+            free(sig_tlv);
+        }
+        
+        // Wrap in BF37 (ProfileInstallationResult)
+        build_tlv(&resp_body, &resp_body_len, 0xBF37, pir_final_buf, pir_final_len);
+        
+        fprintf(stderr, "[v-euicc] BF23: Success, returning ProfileInstallationResult (%u bytes)\n", resp_body_len);
+        
+        // DEBUG: Dump first 40 bytes of response
+        fprintf(stderr, "[v-euicc] BF23 Response hex: ");
+        for (uint32_t i = 0; i < resp_body_len && i < 40; i++) {
+            fprintf(stderr, "%02X ", resp_body[i]);
+        }
+        fprintf(stderr, "...\n");
+        
         break;
     }
 
-    case 0xA0:   // firstSequenceOf87 (ConfigureISDP)
-    case 0xA1:   // sequenceOf88 (StoreMetadata)
-    case 0xA2:   // secondSequenceOf87 (ReplaceSessionKeys) (optional)
-    case 0xA3:   // sequenceOf86 (Profile data)
+    case 0x86:   // Profile element data (sent individually by lpac)
+    case 0x87:   // Encrypted APDU (ConfigureISDP or ReplaceSessionKeys)
+    case 0x88:   // MAC-protected data (StoreMetadata)
+    case 0xA0:   // firstSequenceOf87 (ConfigureISDP) wrapper
+    case 0xA1:   // sequenceOf88 (StoreMetadata) wrapper
+    case 0xA2:   // secondSequenceOf87 (ReplaceSessionKeys) wrapper (optional)
+    case 0xA3:   // sequenceOf86 (Profile data) wrapper
     {
         // Store encrypted profile data from BPP commands
+        // lpac sends both wrappers (A0/A1/A2/A3) and unwrapped inner commands (0x86/0x87/0x88)
         state->bpp_commands_received++;
         fprintf(stderr, "[v-euicc] BPP data command %04X received (count: %d), data_len: %u\n",
                 tag, state->bpp_commands_received, command_len);
@@ -1440,16 +1722,86 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
             }
         }
 
-        // For all but the last command, just return success
+        // For all but the last command (A3), return ProfileInstallationResult
         if (tag != 0xA3) {
-            // Return 9000 (success, continue)
-            *response_len = 2;
-            *response = malloc(*response_len);
-            if (*response) {
-                (*response)[0] = 0x90;
-                (*response)[1] = 0x00;
+            // Build ProfileInstallationResult with success for intermediate commands
+            uint8_t pir_buf[256];
+            uint8_t *pir_ptr = pir_buf;
+            uint32_t pir_len = 0;
+            
+            // transactionId
+            uint8_t *tid_tlv = NULL;
+            uint32_t tid_tlv_len = 0;
+            build_tlv(&tid_tlv, &tid_tlv_len, 0x80, state->transaction_id, state->transaction_id_len);
+            if (tid_tlv) {
+                memcpy(pir_ptr, tid_tlv, tid_tlv_len);
+                pir_ptr += tid_tlv_len;
+                pir_len += tid_tlv_len;
+                free(tid_tlv);
             }
-            return 0;
+            
+            // notificationMetadata BF2F { seqNumber }
+            uint8_t seq_num = 0;
+            uint8_t *seq_tlv = NULL;
+            uint32_t seq_tlv_len = 0;
+            build_tlv(&seq_tlv, &seq_tlv_len, 0x80, &seq_num, 1);
+            uint8_t *nm_tlv = NULL;
+            uint32_t nm_tlv_len = 0;
+            if (seq_tlv) {
+                build_tlv(&nm_tlv, &nm_tlv_len, 0xBF2F, seq_tlv, seq_tlv_len);
+                free(seq_tlv);
+            }
+            if (nm_tlv) {
+                memcpy(pir_ptr, nm_tlv, nm_tlv_len);
+                pir_ptr += nm_tlv_len;
+                pir_len += nm_tlv_len;
+                free(nm_tlv);
+            }
+            
+            // smdpOid
+            uint8_t dummy_oid[] = {0x06, 0x03, 0x04, 0x00, 0x7F};
+            memcpy(pir_ptr, dummy_oid, sizeof(dummy_oid));
+            pir_ptr += sizeof(dummy_oid);
+            pir_len += sizeof(dummy_oid);
+            
+            // finalResult: successResult A2 { A0 {} }
+            uint8_t success_result[] = {0xA2, 0x02, 0xA0, 0x00};
+            memcpy(pir_ptr, success_result, sizeof(success_result));
+            pir_len += sizeof(success_result);
+            
+            // Wrap in ProfileInstallationResultData (BF27)
+            uint8_t *pir_data_tlv = NULL;
+            uint32_t pir_data_tlv_len = 0;
+            build_tlv(&pir_data_tlv, &pir_data_tlv_len, 0xBF27, pir_buf, pir_len);
+            
+            // Build ProfileInstallationResult (BF37)
+            uint8_t pir_final_buf[512];
+            uint8_t *pir_final_ptr = pir_final_buf;
+            uint32_t pir_final_len = 0;
+            
+            if (pir_data_tlv) {
+                memcpy(pir_final_ptr, pir_data_tlv, pir_data_tlv_len);
+                pir_final_ptr += pir_data_tlv_len;
+                pir_final_len += pir_data_tlv_len;
+                free(pir_data_tlv);
+            }
+            
+            // Add dummy signature
+            uint8_t dummy_sig[64] = {0};
+            uint8_t *sig_tlv = NULL;
+            uint32_t sig_tlv_len = 0;
+            build_tlv(&sig_tlv, &sig_tlv_len, 0x5F37, dummy_sig, sizeof(dummy_sig));
+            if (sig_tlv) {
+                memcpy(pir_final_ptr, sig_tlv, sig_tlv_len);
+                pir_final_len += sig_tlv_len;
+                free(sig_tlv);
+            }
+            
+            // Wrap in BF37
+            build_tlv(&resp_body, &resp_body_len, 0xBF37, pir_final_buf, pir_final_len);
+            
+            fprintf(stderr, "[v-euicc] BPP command %04X: Returning ProfileInstallationResult\n", tag);
+            break;
         }
         
         // Last command (sequenceOf86) - install the profile and return ProfileInstallationResult
@@ -1478,6 +1830,51 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
 
             fprintf(stderr, "[v-euicc] Stored %u bytes of BPP data\n",
                     state->bound_profile_package_len);
+
+            // Create profile metadata entry
+            struct profile_metadata *new_profile = malloc(sizeof(struct profile_metadata));
+            if (new_profile) {
+                memset(new_profile, 0, sizeof(struct profile_metadata));
+                
+                // Generate ICCID (for now, use a test ICCID based on matching_id)
+                // In a real implementation, this would be extracted from decrypted profile
+                snprintf(new_profile->iccid, sizeof(new_profile->iccid), "8949449999999990049");
+                
+                // Generate ISD-P AID (dummy for now)
+                snprintf(new_profile->isdp_aid, sizeof(new_profile->isdp_aid), 
+                        "A0000005591010FFFFFFFF8900001000");
+                
+                // Set profile state (disabled by default)
+                new_profile->state = PROFILE_STATE_DISABLED;
+                
+                // Use matching_id as profile name
+                if (strlen(state->matching_id) > 0) {
+                    strncpy(new_profile->profile_name, state->matching_id, 
+                           sizeof(new_profile->profile_name) - 1);
+                } else {
+                    strncpy(new_profile->profile_name, "Unknown Profile", 
+                           sizeof(new_profile->profile_name) - 1);
+                }
+                
+                // Set service provider name (for demo)
+                strncpy(new_profile->service_provider_name, "OsmocomSPN", 
+                       sizeof(new_profile->service_provider_name) - 1);
+                
+                // Store profile data
+                new_profile->profile_data = malloc(state->bound_profile_package_len);
+                if (new_profile->profile_data) {
+                    memcpy(new_profile->profile_data, state->bound_profile_package, 
+                          state->bound_profile_package_len);
+                    new_profile->profile_data_len = state->bound_profile_package_len;
+                }
+                
+                // Add to linked list
+                new_profile->next = state->profiles;
+                state->profiles = new_profile;
+                
+                fprintf(stderr, "[v-euicc] Created profile metadata: ICCID=%s, Name=%s\n",
+                       new_profile->iccid, new_profile->profile_name);
+            }
 
             // Clear the BPP buffer after installation
             free(state->bound_profile_package);
@@ -1518,10 +1915,17 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
         seq_num_buf[1] = (state->notification_seq_number >> 16) & 0xFF;
         seq_num_buf[2] = (state->notification_seq_number >> 8) & 0xFF;
         seq_num_buf[3] = state->notification_seq_number & 0xFF;
-        // Find actual length
+        
+        fprintf(stderr, "[v-euicc] Building notificationMetadata: seqNumber=%u, buf=[%02X %02X %02X %02X]\n",
+                state->notification_seq_number, seq_num_buf[0], seq_num_buf[1], seq_num_buf[2], seq_num_buf[3]);
+        
+        // Find actual length (trim leading zeros)
         while (seq_num_len > 1 && seq_num_buf[sizeof(seq_num_buf) - seq_num_len] == 0) {
             seq_num_len--;
         }
+        
+        fprintf(stderr, "[v-euicc] After trimming: seq_num_len=%u, data starts at offset %u\n",
+                seq_num_len, (uint32_t)(sizeof(seq_num_buf) - seq_num_len));
         
         uint8_t *seq_tlv = NULL;
         uint32_t seq_tlv_len = 0;
@@ -1568,38 +1972,45 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
         pir_len += sizeof(smdp_oid);
         
         // Add finalResult (tag 0xA2) - SUCCESS
+        // SGP.22: finalResult [2] CHOICE { successResult [0], errorResult [1] }
+        // For success: A2 { A0 { SEQUENCE { aid, simaResponse } } }
         uint8_t success_result_buf[64];
         uint8_t *success_ptr = success_result_buf;
         uint32_t success_len = 0;
         
-        // SuccessResult (tag 0xA0) { aid, simaResponse }
+        // Build SEQUENCE { aid (4F), simaResponse (04) }
         uint8_t dummy_aid[] = {0x4F, 0x10, 0xA0, 0x00, 0x00, 0x05, 0x59, 0x10, 0x10, 0xFF, 0xFF, 0xFF, 0xFF, 0x89, 0x00, 0x00, 0x10, 0x00};
         memcpy(success_ptr, dummy_aid, sizeof(dummy_aid));
         success_ptr += sizeof(dummy_aid);
         success_len += sizeof(dummy_aid);
         
-        // simaResponse (tag 0x04): minimal response
+        // simaResponse (tag 0x04): 9000 (success)
         uint8_t sima[] = {0x04, 0x02, 0x90, 0x00};
         memcpy(success_ptr, sima, sizeof(sima));
         success_len += sizeof(sima);
         
-        // Wrap in SEQUENCE (0x30) - this becomes the successResult CHOICE alternative
+        // Wrap in SEQUENCE (0x30)
         uint8_t *success_seq = NULL;
         uint32_t success_seq_len = 0;
         build_tlv(&success_seq, &success_seq_len, 0x30, success_result_buf, success_len);
 
-        // Wrap in finalResult [2] CHOICE (0xA2) - CHOICE alternatives are not explicitly tagged
+        // Wrap in successResult [0] (0xA0)
+        uint8_t *success_result_tlv = NULL;
+        uint32_t success_result_tlv_len = 0;
+        build_tlv(&success_result_tlv, &success_result_tlv_len, 0xA0, success_seq, success_seq_len);
+        free(success_seq);
+
+        // Wrap in finalResult [2] (0xA2)
         uint8_t *final_result_tlv = NULL;
         uint32_t final_result_tlv_len = 0;
-        build_tlv(&final_result_tlv, &final_result_tlv_len, 0xA2, success_seq, success_seq_len);
+        build_tlv(&final_result_tlv, &final_result_tlv_len, 0xA2, success_result_tlv, success_result_tlv_len);
+        free(success_result_tlv);
+        
         if (final_result_tlv) {
-            // Overwrite with wrapped version
-            memcpy(pir_data_buf + pir_len - success_len, final_result_tlv, final_result_tlv_len);
-            pir_len = pir_len - success_len + final_result_tlv_len;
+            memcpy(pir_ptr, final_result_tlv, final_result_tlv_len);
+            pir_ptr += final_result_tlv_len;
+            pir_len += final_result_tlv_len;
             free(final_result_tlv);
-        }
-        if (success_seq) {
-            free(success_seq);
         }
         
         // Wrap ProfileInstallationResultData (tag 0xBF27)
@@ -1626,40 +2037,171 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
             return -1;
         }
         
-        // TEMP: Return simple success to bypass ProfileInstallationResult parsing issues
-        *response_len = 2;
-        *response = malloc(*response_len);
-        if (*response) {
-            (*response)[0] = 0x90;
-            (*response)[1] = 0x00;
+        // Build final ProfileInstallationResult response
+        uint8_t pir_resp_buf[2048];
+        uint8_t *pir_resp_ptr = pir_resp_buf;
+        uint32_t pir_resp_len = 0;
+        
+        // Add ProfileInstallationResultData
+        memcpy(pir_resp_ptr, pir_data_tlv, pir_data_tlv_len);
+        pir_resp_ptr += pir_data_tlv_len;
+        pir_resp_len += pir_data_tlv_len;
+        free(pir_data_tlv);
+        
+        // Add signature (tag 0x5F37)
+        uint8_t *pir_sig_tlv = NULL;
+        uint32_t pir_sig_tlv_len = 0;
+        build_tlv(&pir_sig_tlv, &pir_sig_tlv_len, 0x5F37, pir_signature, pir_signature_len);
+        free(pir_signature);
+        
+        if (pir_sig_tlv) {
+            memcpy(pir_resp_ptr, pir_sig_tlv, pir_sig_tlv_len);
+            pir_resp_len += pir_sig_tlv_len;
+            free(pir_sig_tlv);
         }
-        fprintf(stderr, "[v-euicc] BPP data command %04X: Simple success response (bypassing ProfileInstallationResult)\n", tag);
-
-        // Clean up allocated memory
-        if (pir_data_tlv) free(pir_data_tlv);
-        if (pir_signature) free(pir_signature);
-
+        
+        // Wrap in ProfileInstallationResult (tag 0xBF37)
+        build_tlv(&resp_body, &resp_body_len, 0xBF37, pir_resp_buf, pir_resp_len);
+        
+        fprintf(stderr, "[v-euicc] ProfileInstallationResult built successfully (%u bytes)\n", resp_body_len);
+        
+        // DEBUG: Dump first 60 bytes of final response
+        fprintf(stderr, "[v-euicc] Final A3 Response hex: ");
+        for (uint32_t i = 0; i < resp_body_len && i < 60; i++) {
+            fprintf(stderr, "%02X ", resp_body[i]);
+        }
+        fprintf(stderr, "...\n");
+        
         break;
     }
 
-    case 0xBF36: // BoundProfilePackage (complete package)
+    case 0xBF2D: // GetProfilesInfo (ES10c)
     {
-        fprintf(stderr, "[v-euicc] BoundProfilePackage (BF36) received, len=%u, HIT! Processing...\n", command_len);
-
-        // Parse the BoundProfilePackage and extract individual BPP commands
-        // BF36 contains: BF23, A0, A1, A2, A3
-
-        // For now, just acknowledge the package and return success
-        // In a real implementation, we would parse and process each command
-
-        // TEMP: Return simple success to bypass ProfileInstallationResult parsing issues
-        *response_len = 2;
-        *response = malloc(*response_len);
-        if (*response) {
-            (*response)[0] = 0x90;
-            (*response)[1] = 0x00;
+        fprintf(stderr, "[v-euicc] GetProfilesInfo (BF2D) received - building profile list\n");
+        
+        // Build ProfileInfoListResponse: BF2D { A0 { E3 {...}, E3 {...}, ... } }
+        uint8_t profile_list_buf[8192];
+        uint8_t *list_ptr = profile_list_buf;
+        uint32_t list_len = 0;
+        
+        // Iterate through all profiles
+        struct profile_metadata *profile = state->profiles;
+        int profile_count = 0;
+        
+        while (profile) {
+            uint8_t profile_info_buf[512];
+            uint8_t *info_ptr = profile_info_buf;
+            uint32_t info_len = 0;
+            
+            // Add ICCID (tag 0x5A) - must be BCD encoded
+            uint8_t iccid_bcd[10];
+            uint32_t iccid_len = strlen(profile->iccid);
+            // Convert string ICCID to BCD
+            for (uint32_t i = 0; i < 10; i++) {
+                uint8_t high = (i*2 < iccid_len) ? (profile->iccid[i*2] - '0') : 0xF;
+                uint8_t low = (i*2+1 < iccid_len) ? (profile->iccid[i*2+1] - '0') : 0xF;
+                iccid_bcd[i] = (high << 4) | low;
+            }
+            
+            uint8_t *iccid_tlv = NULL;
+            uint32_t iccid_tlv_len = 0;
+            build_tlv(&iccid_tlv, &iccid_tlv_len, 0x5A, iccid_bcd, 10);
+            if (iccid_tlv) {
+                memcpy(info_ptr, iccid_tlv, iccid_tlv_len);
+                info_ptr += iccid_tlv_len;
+                info_len += iccid_tlv_len;
+                free(iccid_tlv);
+            }
+            
+            // Add ISD-P AID (tag 0x4F) - hex string to binary
+            if (strlen(profile->isdp_aid) > 0) {
+                uint8_t aid_bin[16];
+                uint32_t aid_bin_len = euicc_hexutil_hex2bin(aid_bin, sizeof(aid_bin), profile->isdp_aid);
+                
+                uint8_t *aid_tlv = NULL;
+                uint32_t aid_tlv_len = 0;
+                build_tlv(&aid_tlv, &aid_tlv_len, 0x4F, aid_bin, aid_bin_len);
+                if (aid_tlv) {
+                    memcpy(info_ptr, aid_tlv, aid_tlv_len);
+                    info_ptr += aid_tlv_len;
+                    info_len += aid_tlv_len;
+                    free(aid_tlv);
+                }
+            }
+            
+            // Add profileState (tag 0x9F70)
+            uint8_t state_val = (uint8_t)profile->state;
+            uint8_t *state_tlv = NULL;
+            uint32_t state_tlv_len = 0;
+            build_tlv(&state_tlv, &state_tlv_len, 0x9F70, &state_val, 1);
+            if (state_tlv) {
+                memcpy(info_ptr, state_tlv, state_tlv_len);
+                info_ptr += state_tlv_len;
+                info_len += state_tlv_len;
+                free(state_tlv);
+            }
+            
+            // Add serviceProviderName (tag 0x91)
+            if (strlen(profile->service_provider_name) > 0) {
+                uint8_t *spn_tlv = NULL;
+                uint32_t spn_tlv_len = 0;
+                build_tlv(&spn_tlv, &spn_tlv_len, 0x91, 
+                         (const uint8_t*)profile->service_provider_name, 
+                         strlen(profile->service_provider_name));
+                if (spn_tlv) {
+                    memcpy(info_ptr, spn_tlv, spn_tlv_len);
+                    info_ptr += spn_tlv_len;
+                    info_len += spn_tlv_len;
+                    free(spn_tlv);
+                }
+            }
+            
+            // Add profileName (tag 0x92)
+            if (strlen(profile->profile_name) > 0) {
+                uint8_t *name_tlv = NULL;
+                uint32_t name_tlv_len = 0;
+                build_tlv(&name_tlv, &name_tlv_len, 0x92, 
+                         (const uint8_t*)profile->profile_name, 
+                         strlen(profile->profile_name));
+                if (name_tlv) {
+                    memcpy(info_ptr, name_tlv, name_tlv_len);
+                    info_ptr += name_tlv_len;
+                    info_len += name_tlv_len;
+                    free(name_tlv);
+                }
+            }
+            
+            // Wrap in ProfileInfo (tag 0xE3)
+            uint8_t *profile_info_tlv = NULL;
+            uint32_t profile_info_tlv_len = 0;
+            build_tlv(&profile_info_tlv, &profile_info_tlv_len, 0xE3, profile_info_buf, info_len);
+            if (profile_info_tlv) {
+                memcpy(list_ptr, profile_info_tlv, profile_info_tlv_len);
+                list_ptr += profile_info_tlv_len;
+                list_len += profile_info_tlv_len;
+                free(profile_info_tlv);
+            }
+            
+            profile = profile->next;
+            profile_count++;
         }
-        fprintf(stderr, "[v-euicc] BF36: Simple success response (bypassing ProfileInstallationResult)\n");
+        
+        fprintf(stderr, "[v-euicc] Built profile list with %d profiles, total len: %u\n", 
+                profile_count, list_len);
+        
+        // Wrap in profileInfoListOk (tag 0xA0)
+        uint8_t *list_ok_tlv = NULL;
+        uint32_t list_ok_tlv_len = 0;
+        build_tlv(&list_ok_tlv, &list_ok_tlv_len, 0xA0, profile_list_buf, list_len);
+        if (!list_ok_tlv) {
+            return -1;
+        }
+        
+        // Wrap in GetProfilesInfoResponse (tag 0xBF2D)
+        build_tlv(&resp_body, &resp_body_len, 0xBF2D, list_ok_tlv, list_ok_tlv_len);
+        free(list_ok_tlv);
+        
+        fprintf(stderr, "[v-euicc] GetProfilesInfo response built, total len: %u\n", resp_body_len);
         break;
     }
 

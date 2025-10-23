@@ -808,15 +808,12 @@ int es10b_load_bound_profile_package(struct euicc_ctx *ctx, struct es10b_load_bo
         return -1;
     }
 
-    // TEMP: Always return success to bypass BPP parsing issues
     fret = es10b_load_bound_profile_package_r(ctx, result, ctx->http._internal.b64_bound_profile_package);
-    // Ignore errors and always succeed
-    (void)fret;  // suppress unused variable warning
 
     free(ctx->http._internal.b64_bound_profile_package);
     ctx->http._internal.b64_bound_profile_package = NULL;
 
-    return 0;
+    return fret;
 }
 
 int es10b_get_euicc_challenge_and_info(struct euicc_ctx *ctx) {

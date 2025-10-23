@@ -36,6 +36,17 @@ void euicc_state_init(struct euicc_state *state) {
     state->bpp_commands_received = 0;
     state->notification_seq_number = 1;  // Start from 1
     memset(state->matching_id, 0, sizeof(state->matching_id));
+    
+    // Initialize ECKA session keys
+    state->euicc_otpk = NULL;
+    state->euicc_otpk_len = 0;
+    state->euicc_otsk = NULL;
+    state->euicc_otsk_len = 0;
+    state->smdp_otpk = NULL;
+    state->smdp_otpk_len = 0;
+    memset(state->session_key_enc, 0, sizeof(state->session_key_enc));
+    memset(state->session_key_mac, 0, sizeof(state->session_key_mac));
+    state->session_keys_derived = 0;
 
     // Initialize profile storage
     state->bound_profile_package = NULL;
@@ -45,6 +56,9 @@ void euicc_state_init(struct euicc_state *state) {
     state->installed_profiles = NULL;
     state->installed_profiles_len = 0;
     state->installed_profiles_capacity = 0;
+    
+    // Initialize profile metadata list
+    state->profiles = NULL;
 }
 
 void euicc_state_reset(struct euicc_state *state) {
@@ -76,6 +90,20 @@ void euicc_state_reset(struct euicc_state *state) {
     state->eum_cert = NULL;
     state->euicc_cert_len = 0;
     state->eum_cert_len = 0;
+    
+    // Free ECKA session keys
+    free(state->euicc_otpk);
+    free(state->euicc_otsk);
+    free(state->smdp_otpk);
+    state->euicc_otpk = NULL;
+    state->euicc_otpk_len = 0;
+    state->euicc_otsk = NULL;
+    state->euicc_otsk_len = 0;
+    state->smdp_otpk = NULL;
+    state->smdp_otpk_len = 0;
+    memset(state->session_key_enc, 0, sizeof(state->session_key_enc));
+    memset(state->session_key_mac, 0, sizeof(state->session_key_mac));
+    state->session_keys_derived = 0;
 
     // Free profile storage
     free(state->bound_profile_package);
@@ -86,6 +114,16 @@ void euicc_state_reset(struct euicc_state *state) {
     state->installed_profiles = NULL;
     state->installed_profiles_len = 0;
     state->installed_profiles_capacity = 0;
+    
+    // Free profile metadata list
+    struct profile_metadata *profile = state->profiles;
+    while (profile) {
+        struct profile_metadata *next = profile->next;
+        free(profile->profile_data);
+        free(profile);
+        profile = next;
+    }
+    state->profiles = NULL;
 }
 
 // Certificate loading moved to cert_loader.c

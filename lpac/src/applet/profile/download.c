@@ -283,10 +283,7 @@ static int applet_main(int argc, char **argv) {
         goto err;
     }
 
-    // TEMP: Bypass result checking for BPP commands
-    cJSON *success_msg = cJSON_CreateString("es10b_load_bound_profile_package completed successfully (bypass)");
-    jprint_success(success_msg);
-    cJSON_Delete(success_msg);
+    jprint_success(NULL);
 
     fret = 0;
     goto exit;

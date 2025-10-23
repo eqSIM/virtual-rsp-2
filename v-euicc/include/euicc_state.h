@@ -2,6 +2,24 @@
 
 #include <stdint.h>
 
+// Profile state enumeration (matches GSMA SGP.22)
+typedef enum {
+    PROFILE_STATE_DISABLED = 0,
+    PROFILE_STATE_ENABLED = 1
+} profile_state_t;
+
+// Profile metadata for ES10c operations
+struct profile_metadata {
+    char iccid[21];                  // ICCID (BCD, up to 20 digits + null)
+    char isdp_aid[33];               // ISD-P AID (hex string, 16 bytes + null)
+    profile_state_t state;           // Profile state (enabled/disabled)
+    char profile_name[64];           // Profile name
+    char service_provider_name[64];  // Service provider name
+    uint8_t *profile_data;           // Encrypted profile package
+    uint32_t profile_data_len;       // Length of profile data
+    struct profile_metadata *next;   // Linked list
+};
+
 struct euicc_state {
     char eid[33];                    // 32 hex chars + null terminator
     char default_smdp[256];          // Default SM-DP+ address
@@ -33,6 +51,19 @@ struct euicc_state {
     int bpp_commands_received;       // Count of BPP commands received
     uint32_t notification_seq_number; // Sequence number for notifications
     char matching_id[256];           // MatchingID from download request
+    
+    // ECKA (Elliptic Curve Key Agreement) session keys for BPP decryption
+    uint8_t *euicc_otpk;             // otPK.EUICC.ECKA (one-time public key, 65 bytes uncompressed)
+    uint32_t euicc_otpk_len;
+    uint8_t *euicc_otsk;             // otSK.EUICC.ECKA (one-time private key, 32 bytes)
+    uint32_t euicc_otsk_len;
+    uint8_t *smdp_otpk;              // otPK.DP.ECKA from SM-DP+ (65 bytes uncompressed)
+    uint32_t smdp_otpk_len;
+    
+    // Derived session keys (from ECKA key agreement, Annex G of SGP.22)
+    uint8_t session_key_enc[16];     // KEK for profile encryption (AES-128)
+    uint8_t session_key_mac[16];     // KM for MAC verification (AES-128)
+    int session_keys_derived;        // Flag: 1 if session keys have been derived
 
     // Profile package storage (Bound Profile Package)
     uint8_t *bound_profile_package;   // Encrypted profile package data
@@ -43,6 +74,9 @@ struct euicc_state {
     uint8_t *installed_profiles;      // Simple storage of installed profile data
     uint32_t installed_profiles_len;  // Length of installed data
     uint32_t installed_profiles_capacity; // Allocated capacity
+    
+    // Profile metadata list (ES10c support)
+    struct profile_metadata *profiles; // Linked list of installed profiles
 };
 
 // Initialize virtual eUICC state with default values

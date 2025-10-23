@@ -1,5 +1,6 @@
 - **Getting Started**
   - [🏠 Home](README)
+  - [🚀 Quick Start](quick-start)
   - [🏗️ Setup & Configuration](setup)
   - [🏛️ Architecture Overview](architecture)
 
@@ -8,8 +9,12 @@
   - [📦 Profile Download](profile-download)
   - [🔧 API Reference](api-reference)
 
-- **Development**
+- **Cryptography & Testing**
+  - [🔐 Cryptographic Operations](cryptography)
+  - [🧪 Test Profiles](test-profiles)
   - [🛠️ Development Guide](development)
+
+- **Support**
   - [❓ Troubleshooting](troubleshooting)
 
 - **External Links**
