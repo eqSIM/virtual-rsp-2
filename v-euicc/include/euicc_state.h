@@ -1,12 +1,19 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 
 // Profile state enumeration (matches GSMA SGP.22)
 typedef enum {
     PROFILE_STATE_DISABLED = 0,
     PROFILE_STATE_ENABLED = 1
 } profile_state_t;
+
+// PQC capability flags
+typedef struct {
+    bool mlkem768_supported;    // ML-KEM-768 support
+    bool hybrid_mode_active;    // Currently using hybrid mode
+} pqc_capabilities_t;
 
 // Profile metadata for ES10c operations
 struct profile_metadata {
@@ -64,6 +71,13 @@ struct euicc_state {
     uint8_t session_key_enc[16];     // KEK for profile encryption (AES-128)
     uint8_t session_key_mac[16];     // KM for MAC verification (AES-128)
     int session_keys_derived;        // Flag: 1 if session keys have been derived
+    
+    // PQC capabilities and hybrid key agreement
+    pqc_capabilities_t pqc_caps;     // PQC capability flags
+    uint8_t *euicc_pk_kem;           // ML-KEM-768 public key (1184 bytes)
+    uint32_t euicc_pk_kem_len;
+    uint8_t *euicc_sk_kem;           // ML-KEM-768 secret key (2400 bytes)
+    uint32_t euicc_sk_kem_len;
 
     // Profile package storage (Bound Profile Package)
     uint8_t *bound_profile_package;   // Encrypted profile package data

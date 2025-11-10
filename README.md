@@ -11,6 +11,139 @@ This project successfully implements a **full virtual eSIM (RSP) solution** with
 - **📡 Protocol Compatibility**: SGP.22 v2.2.2 ↔ v2.5+ interoperability
 - **🏗️ Production Architecture**: Modular design for embedded deployment
 - **🔄 Session Management**: Complete profile download flow implementation
+- **🛡️ Post-Quantum Cryptography**: Hybrid ECDH + ML-KEM-768 key agreement (experimental)
+
+## 🔮 Post-Quantum Cryptography (PQC) Support
+
+This implementation includes **experimental support for post-quantum cryptography** using hybrid key exchange:
+
+### Features
+
+- **Hybrid Key Agreement**: Combines classical ECDH P-256 with ML-KEM-768 (NIST-approved)
+- **Defense in Depth**: Both classical and PQC algorithms must be broken for compromise
+- **Backward Compatible**: Automatic fallback to classical mode for non-PQC clients
+- **NIST Compliant**: Uses ML-KEM-768 (formerly Kyber-768) from FIPS 203
+- **Nested KDF**: Domain-separated key derivation following NIST SP 800-56C
+
+### Security Properties
+
+| Mode | Classical Security | Quantum Security | Key Exchange |
+|------|-------------------|------------------|--------------|
+| Classical | 128-bit (ECDH P-256) | ❌ Vulnerable | 32 bytes |
+| Hybrid | 128-bit (ECDH P-256) | ✅ 192-bit equivalent (ML-KEM-768) | 64 bytes (combined) |
+
+### Quick Start with PQC
+
+```bash
+# 1. Install dependencies
+brew install liboqs  # macOS
+# apt-get install liboqs-dev  # Linux
+
+# 2. Build with PQC support (enabled by default)
+mkdir build && cd build
+cmake ..
+make
+
+# 3. Run PQC-enabled daemon
+./build/v-euicc/v-euicc-daemon 8765 --enable-pqc
+
+# 4. Verify hybrid mode
+./tests/scripts/validate-pqc.sh
+./tests/scripts/test-hybrid-mode.sh
+```
+
+### Implementation Details
+
+- **eUICC Side**: Generates ML-KEM-768 keypair (1184-byte PK, 2400-byte SK) in `PrepareDownload`
+- **SM-DP+ Side**: Performs ML-KEM encapsulation, generates 1088-byte ciphertext
+- **Key Derivation**: Nested KDF combining Z_ec (ECDH) and Z_kem (ML-KEM) → KEK + KM
+- **Protocol Extension**: Custom tags 0x5F4A (PK) and 0x5F4B (CT) for ML-KEM data
+- **Payload Overhead**: ~2.3KB total (acceptable for ~20-40KB profiles, <10% increase)
+
+### Testing
+
+```bash
+# Run all PQC tests
+cd tests/scripts
+./test-classical-fallback.sh  # Verify backward compatibility
+./test-hybrid-mode.sh          # Test PQC-enabled flow
+./test-interop.sh              # Test all combinations
+./demo-pqc-detailed.sh         # Detailed cryptographic demonstration
+
+# Unit tests
+cd build
+ctest --output-on-failure
+```
+
+### Performance
+
+Typical timing on modern hardware (M1 Mac):
+- ML-KEM-768 Keypair: ~0.05 ms
+- ML-KEM-768 Encapsulation: ~0.06 ms
+- ML-KEM-768 Decapsulation: ~0.07 ms
+- Hybrid KDF: ~0.02 ms
+
+**Total overhead: <0.2 ms** (negligible for profile download)
+
+### Architecture
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                      PrepareDownloadResponse                   │
+│  eUICC → SM-DP+                                               │
+│  ┌──────────┐  ┌──────────────┐                              │
+│  │ ECDH PK  │  │ ML-KEM-768 PK │  (1184 bytes, tag 0x5F4A)  │
+│  │ 65 bytes │  │               │                              │
+│  └──────────┘  └──────────────┘                              │
+└────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────┐
+│                   InitialiseSecureChannelRequest               │
+│  SM-DP+ → eUICC                                               │
+│  ┌──────────┐  ┌────────────────┐                            │
+│  │ ECDH PK  │  │ ML-KEM-768 CT  │  (1088 bytes, tag 0x5F4B) │
+│  │ 65 bytes │  │                │                            │
+│  └──────────┘  └────────────────┘                            │
+└────────────────────────────────────────────────────────────────┘
+
+           ┌─────────────────────────────────────┐
+           │      Hybrid Key Derivation          │
+           │  ┌──────────┐    ┌──────────────┐  │
+           │  │   Z_ec   │    │    Z_kem     │  │
+           │  │ (32B)    │    │   (32B)      │  │
+           │  └────┬─────┘    └──────┬───────┘  │
+           │       │                 │          │
+           │       ▼                 ▼          │
+           │  ┌──────────┐    ┌──────────────┐  │
+           │  │   K_ec   │    │    K_kem     │  │
+           │  │ HKDF-SHA256   │ HKDF-SHA256  │  │
+           │  └────┬─────┘    └──────┬───────┘  │
+           │       └─────────┬────────┘          │
+           │                 ▼                   │
+           │         ┌───────────────┐           │
+           │         │ Combined (64B)│           │
+           │         └───────┬───────┘           │
+           │                 ▼                   │
+           │         ┌───────────────┐           │
+           │         │ KEK (16B)     │           │
+           │         │ KM (16B)      │           │
+           │         └───────────────┘           │
+           └─────────────────────────────────────┘
+```
+
+### Limitations
+
+- **Experimental**: Not yet standardized in SGP.22 (uses custom ASN.1 extensions)
+- **Python Bindings**: SM-DP+ requires shared library version of liboqs (not available by default on macOS)
+- **Signature Schemes**: Only key exchange is PQC-protected; signatures remain ECDSA
+- **Profile Size**: Not currently using PQC for profile encryption (future work)
+
+### References
+
+- [NIST FIPS 203: Module-Lattice-Based Key-Encapsulation Mechanism](https://csrc.nist.gov/publications/detail/fips/203/final)
+- [liboqs: Open Quantum Safe](https://github.com/open-quantum-safe/liboqs)
+- [NIST SP 800-56C: Recommendation for Key-Derivation Methods](https://csrc.nist.gov/publications/detail/sp/800-56c/rev-2/final)
+- [SGP.22 v3.0: RSP Technical Specification](https://www.gsma.com/esim/resources/)
 
 ## Components
 

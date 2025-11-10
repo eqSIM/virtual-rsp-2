@@ -198,6 +198,47 @@ class BoundProfilePackage(ProfilePackage):
 
         # 'initialiseSecureChannelRequest'
         bpp_seq = rsp.asn1.encode('InitialiseSecureChannelRequest', iscr)
+        
+        # PQC Extension: Inject ML-KEM ciphertext (tag 0x5F4B) if present
+        if hasattr(ss, 'smdp_ct_kem') and ss.smdp_ct_kem:
+            logger.debug(f"[PQC] Injecting ML-KEM ciphertext ({len(ss.smdp_ct_kem)} bytes) into InitialiseSecureChannel")
+            # We need to inject the 0x5F4B TLV into the BF23 (InitialiseSecureChannelRequest) structure
+            # The BF23 structure is already encoded, so we need to decode it, append our TLV, and re-encode
+            # For simplicity, we'll append it as raw bytes before the closing of BF23
+            # Format: 5F4B [length] [ciphertext]
+            ct_tlv = wrap_as_der_tlv(0x5F4B, ss.smdp_ct_kem)
+            # Insert the TLV before the end of the BF23 structure
+            # BF23 is already complete, so we need to extract its payload, append our TLV, and re-wrap
+            # This is tricky, so for now we'll use a simpler approach: modify the signed part
+            # Actually, since bpp_seq is the full encoded InitialiseSecureChannelRequest,
+            # we can't easily inject into it without re-parsing. Let's modify gen_initialiseSecureChannel instead.
+            # For now, store it in iscr and hope the ASN.1 encoder allows unknown fields
+            # Or we manually construct the TLV
+            
+            # Simple approach: parse bpp_seq, inject TLV, reconstruct
+            # Since BF23 uses SEQUENCE, we can append after the existing fields
+            # Extract payload from BF23 tag
+            if bpp_seq[0:2] == bytes([0xBF, 0x23]):
+                # Parse length
+                offset = 2
+                length_byte = bpp_seq[offset]
+                offset += 1
+                if length_byte & 0x80:
+                    num_len_bytes = length_byte & 0x7F
+                    length = 0
+                    for _ in range(num_len_bytes):
+                        length = (length << 8) | bpp_seq[offset]
+                        offset += 1
+                else:
+                    length = length_byte
+                
+                # Extract existing payload
+                payload = bpp_seq[offset:offset+length]
+                # Append CT TLV
+                new_payload = payload + ct_tlv
+                # Reconstruct BF23
+                bpp_seq = bertlv_encode_tag(0xBF23) + bertlv_encode_len(len(new_payload)) + new_payload
+                logger.debug(f"[PQC] Injected ML-KEM ciphertext, new InitialiseSecureChannel size: {len(bpp_seq)} bytes")
         # firstSequenceOf87
         logger.debug("BPP_ENCODE_DEBUG: Encrypting ConfigureISDP with BSP keys")
         logger.debug(f"BPP_ENCODE_DEBUG: BSP S-ENC: {bsp.c_algo.s_enc.hex()}")

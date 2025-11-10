@@ -2,8 +2,6 @@
 # Detailed Demo: Shows cryptographic details of SGP.22 profile installation
 # This script displays certificates, signatures, authentication flow, and profile parsing
 
-set -e
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
@@ -62,13 +60,13 @@ lsof -ti:8000 | xargs kill -9 2>/dev/null || true
 lsof -ti:8443 | xargs kill -9 2>/dev/null || true
 sleep 2
 
-# Start v-euicc
-echo -e "${BLUE}▶${NC} Starting v-euicc daemon..."
-./build/v-euicc/v-euicc-daemon 8765 > /tmp/detailed-euicc.log 2>&1 &
+# Start v-euicc (classical mode - without PQC)
+echo -e "${BLUE}▶${NC} Starting v-euicc daemon (classical mode)..."
+./build/v-euicc/v-euicc-daemon-classical 8765 > /tmp/detailed-euicc.log 2>&1 &
 EUICC_PID=$!
 sleep 2
 [ ! kill -0 $EUICC_PID 2>/dev/null ] && echo -e "${RED}✗${NC} Failed to start v-euicc" && exit 1
-echo -e "${GREEN}✓${NC} v-euicc started (PID: $EUICC_PID)"
+echo -e "${GREEN}✓${NC} v-euicc started (classical mode, PID: $EUICC_PID)"
 
 # Configure hosts
 echo -e "${BLUE}▶${NC} Configuring /etc/hosts..."
@@ -92,6 +90,7 @@ echo -e "${GREEN}✓${NC} SM-DP+ and nginx started"
 # Setup lpac environment
 LPAC="./build/lpac/src/lpac"
 export DYLD_LIBRARY_PATH=./build/lpac/euicc:./build/lpac/utils:./build/lpac/driver
+export LPAC_DRIVER_PATH="$(pwd)/build/driver"
 export LPAC_APDU=socket
 export LPAC_APDU_SOCKET_HOST=127.0.0.1
 export LPAC_APDU_SOCKET_PORT=8765

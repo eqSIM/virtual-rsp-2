@@ -1,0 +1,47 @@
+# RSP Performance Metrics - CLASSICAL Mode (TRUE DATA)
+# Extracted from: /tmp/detailed-euicc.log
+# Generated: 2025-11-10 21:55:45
+
+[KEY_SIZES]
+ecdh_public_key_bytes=65
+ecdh_private_key_bytes=32
+mlkem_public_key_bytes=0
+mlkem_secret_key_bytes=0
+mlkem_ciphertext_bytes=0
+total_pqc_overhead_bytes=0
+
+[PERFORMANCE_TIMINGS_MS]
+mlkem_keypair_generation_ms=0
+mlkem_decapsulation_ms=0
+hybrid_kdf_ms=0
+total_pqc_overhead_ms=0
+ecdh_computation_ms=NOT_MEASURED
+ecdsa_signature_ms=NOT_MEASURED
+
+[MESSAGE_SIZES_BYTES]
+prepare_download_response_bytes=162
+bound_profile_package_bytes=183
+initialise_secure_channel_bytes=178
+total_encrypted_profile_data_bytes=1689
+
+[PROTOCOL_COUNTERS]
+ecdsa_signatures=3
+ecdh_operations=1
+mlkem_keypair_operations=0
+mlkem_decapsulation_operations=0
+hybrid_kdf_operations=0
+bpp_commands_processed=18
+
+[SECURITY_PROPERTIES]
+classical_security_bits=128
+quantum_security_bits=0
+combined_security_bits=128
+quantum_resistant=false
+nist_level=0
+
+[BANDWIDTH_ANALYSIS]
+total_upload_bytes=162
+total_download_bytes=361
+total_bandwidth_bytes=523
+
+# End of TRUE metrics

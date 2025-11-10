@@ -3,6 +3,8 @@
 #include "crypto.h"
 #include <euicc/hexutil.h>
 #include <openssl/evp.h>
+#include <openssl/ec.h>
+#include <openssl/bn.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -979,7 +981,8 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
 
         // Phase A: Skip signature verification, just build response
         // Build euiccSigned2 (SEQUENCE tag 0x30)
-        uint8_t euicc_signed2_buf[256];
+        // Buffer needs to hold: transactionID (~18) + euiccOtpk (~68) + smdpOid (~10) + ML-KEM PK (~1187) = ~1283 bytes
+        uint8_t euicc_signed2_buf[2048];  // Increased from 256 to support PQC
         uint8_t *signed2_ptr = euicc_signed2_buf;
         uint32_t signed2_len = 0;
         
@@ -1050,13 +1053,60 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
         
         EVP_PKEY_free(otpk_keypair);
         
+#ifdef ENABLE_PQC
+        // Generate ML-KEM-768 keypair if PQC is supported
+        if (state->pqc_caps.mlkem768_supported) {
+            fprintf(stderr, "[v-euicc] Generating ML-KEM-768 keypair for hybrid mode...\n");
+            
+            if (generate_mlkem_keypair(&state->euicc_pk_kem, &state->euicc_pk_kem_len,
+                                      &state->euicc_sk_kem, &state->euicc_sk_kem_len) == 0) {
+                state->pqc_caps.hybrid_mode_active = true;
+                fprintf(stderr, "[v-euicc] ML-KEM-768 keypair generated: pk=%u bytes, sk=%u bytes\n",
+                       state->euicc_pk_kem_len, state->euicc_sk_kem_len);
+                
+                // Detailed PQC demo logging
+                fprintf(stderr, "[PQC-DEMO] PrepareDownload: ML-KEM-768 keypair generated\n");
+                fprintf(stderr, "[PQC-DEMO]   Public Key Size: %u bytes (expected 1184)\n", state->euicc_pk_kem_len);
+                fprintf(stderr, "[PQC-DEMO]   Secret Key Size: %u bytes (expected 2400)\n", state->euicc_sk_kem_len);
+                fprintf(stderr, "[PQC-DEMO]   First 32 bytes of PK: ");
+                for (int i = 0; i < 32 && i < state->euicc_pk_kem_len; i++) {
+                    fprintf(stderr, "%02x", state->euicc_pk_kem[i]);
+                }
+                fprintf(stderr, "...\n");
+                
+                // Add ML-KEM public key to response (tag 0x5F4A = APPLICATION 74, custom extension)
+                fprintf(stderr, "[v-euicc] signed2_len BEFORE adding ML-KEM: %u bytes\n", signed2_len);
+                uint8_t *pk_kem_tlv = NULL;
+                uint32_t pk_kem_tlv_len = 0;
+                build_tlv(&pk_kem_tlv, &pk_kem_tlv_len, 0x5F4A, state->euicc_pk_kem, state->euicc_pk_kem_len);
+                if (pk_kem_tlv) {
+                    fprintf(stderr, "[v-euicc] ML-KEM TLV built: %u bytes (key=%u + TLV overhead)\n", pk_kem_tlv_len, state->euicc_pk_kem_len);
+                    memcpy(signed2_ptr, pk_kem_tlv, pk_kem_tlv_len);
+                    signed2_ptr += pk_kem_tlv_len;
+                    signed2_len += pk_kem_tlv_len;
+                    free(pk_kem_tlv);
+                    fprintf(stderr, "[v-euicc] signed2_len AFTER adding ML-KEM: %u bytes\n", signed2_len);
+                    fprintf(stderr, "[v-euicc] Added ML-KEM public key to PrepareDownload response\n");
+                    fprintf(stderr, "[PQC-DEMO] PrepareDownload: Added tag 0x5F4A (ML-KEM public key) to response\n");
+                } else {
+                    fprintf(stderr, "[v-euicc] ERROR: Failed to build ML-KEM TLV!\n");
+                }
+            } else {
+                fprintf(stderr, "[v-euicc] Warning: ML-KEM keypair generation failed, falling back to classical mode\n");
+                state->pqc_caps.hybrid_mode_active = false;
+            }
+        }
+#endif
+        
         // Wrap in SEQUENCE (tag 0x30)
         uint8_t *euicc_signed2_tlv = NULL;
         uint32_t euicc_signed2_tlv_len = 0;
+        fprintf(stderr, "[v-euicc] Building SEQUENCE wrapper for %u bytes of content\n", signed2_len);
         build_tlv(&euicc_signed2_tlv, &euicc_signed2_tlv_len, 0x30, euicc_signed2_buf, signed2_len);
         if (!euicc_signed2_tlv) {
             return -1;
         }
+        fprintf(stderr, "[v-euicc] euiccSigned2 TLV complete: %u bytes total (content=%u + TLV overhead)\n", euicc_signed2_tlv_len, signed2_len);
         
         // Sign euiccSigned2 + smdpSignature2 according to SGP.22
         uint8_t *signature = NULL;
@@ -1103,7 +1153,8 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
         free(smdp_signature2_do);
         
         // Build PrepareDownloadResponse: BF21 { A0 { euiccSigned2, euiccSignature2 } }
-        uint8_t prep_resp_buf[512];
+        // Buffer needs to hold: euiccSigned2 TLV (~1290) + signature TLV (~67) = ~1357 bytes
+        uint8_t prep_resp_buf[2048];  // Increased from 512 to support PQC
         uint8_t *prep_ptr = prep_resp_buf;
         uint32_t prep_len = 0;
         
@@ -1136,7 +1187,8 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
         build_tlv(&resp_body, &resp_body_len, 0xBF21, resp_ok_tlv, resp_ok_tlv_len);
         free(resp_ok_tlv);
         
-        fprintf(stderr, "[v-euicc] PrepareDownload: Response generated\n");
+        fprintf(stderr, "[v-euicc] PrepareDownload: Response generated (%u bytes total)\n", resp_body_len);
+        fprintf(stderr, "[METRICS] PrepareDownloadResponse: %u bytes\n", resp_body_len);
         break;
     }
     
@@ -1570,22 +1622,229 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
         state->smdp_otpk = smdp_otpk_data;
         state->smdp_otpk_len = smdp_otpk_len;
         
-        // Derive session keys using ECKA (SGP.22 Annex G)
+#ifdef ENABLE_PQC
+        // Look for ML-KEM ciphertext (tag 0x5F4B) if in hybrid mode
+        uint8_t *smdp_ct_kem = NULL;
+        uint32_t smdp_ct_kem_len = 0;
+        
+        if (state->pqc_caps.hybrid_mode_active) {
+            // Reset ptr to beginning to search for ciphertext
+            ptr = command;
+            remaining = command_len;
+            
+            fprintf(stderr, "[v-euicc] BF23: Looking for ML-KEM ciphertext (tag 0x5F4B) in %u bytes\n", remaining);
+            
+            // Skip BF23 tag and length
+            if (remaining > 4 && ptr[0] == 0xBF && ptr[1] == 0x23) {
+                ptr += 2;
+                remaining -= 2;
+                if (ptr[0] < 0x80) {
+                    ptr += 1;
+                    remaining -= 1;
+                } else if (ptr[0] == 0x81) {
+                    ptr += 2;
+                    remaining -= 2;
+                } else if (ptr[0] == 0x82) {
+                    ptr += 3;
+                    remaining -= 3;
+                }
+            }
+            
+            // Look for ciphertext tag 0x5F4B with proper bounds checking
+            while (remaining > 3) {
+                fprintf(stderr, "[v-euicc] BF23: Checking tag at offset, remaining=%u, tag=%02X%02X\n", 
+                        remaining, ptr[0], ptr[1]);
+                
+                if (ptr[0] == 0x5F && ptr[1] == 0x4B) {
+                    // Found ML-KEM ciphertext tag
+                    fprintf(stderr, "[v-euicc] BF23: Found tag 0x5F4B\n");
+                    
+                    // Parse length (ptr[2])
+                    uint32_t header_len = 3;  // tag (2 bytes) + length field start
+                    if (ptr[2] < 0x80) {
+                        // Short form
+                        smdp_ct_kem_len = ptr[2];
+                        fprintf(stderr, "[v-euicc] BF23: Short form length: %u\n", smdp_ct_kem_len);
+                    } else if (ptr[2] == 0x82 && remaining >= 5) {
+                        // Long form (2 bytes)
+                        smdp_ct_kem_len = (ptr[3] << 8) | ptr[4];
+                        header_len = 5;  // tag (2) + 0x82 (1) + length (2)
+                        fprintf(stderr, "[v-euicc] BF23: Long form length: %u\n", smdp_ct_kem_len);
+                    } else {
+                        fprintf(stderr, "[v-euicc] BF23: Invalid length encoding: %02X\n", ptr[2]);
+                        break;
+                    }
+                    
+                    // Validate: ensure we have enough data
+                    if (remaining < header_len + smdp_ct_kem_len) {
+                        fprintf(stderr, "[v-euicc] BF23: Not enough data: have %u, need %u\n", 
+                                remaining, header_len + smdp_ct_kem_len);
+                        break;
+                    }
+                    
+                    // Validate size
+                    if (smdp_ct_kem_len > 0 && smdp_ct_kem_len <= 1088) {
+                        smdp_ct_kem = malloc(smdp_ct_kem_len);
+                        if (smdp_ct_kem) {
+                            // Copy from correct offset (after header)
+                            memcpy(smdp_ct_kem, ptr + header_len, smdp_ct_kem_len);
+                            fprintf(stderr, "[v-euicc] BF23: Extracted ML-KEM ciphertext (%u bytes)\n", smdp_ct_kem_len);
+                            
+                            // Detailed PQC demo logging
+                            fprintf(stderr, "[PQC-DEMO] InitialiseSecureChannel: ML-KEM ciphertext detected\n");
+                            fprintf(stderr, "[PQC-DEMO]   Ciphertext Size: %u bytes (expected 1088)\n", smdp_ct_kem_len);
+                            fprintf(stderr, "[PQC-DEMO]   Tag: 0x5F4B (ML-KEM ciphertext from SM-DP+)\n");
+                            fprintf(stderr, "[PQC-DEMO]   First 32 bytes of CT: ");
+                            for (int i = 0; i < 32 && i < smdp_ct_kem_len; i++) {
+                                fprintf(stderr, "%02x", smdp_ct_kem[i]);
+                            }
+                            fprintf(stderr, "...\n");
+                            fprintf(stderr, "[PQC-DEMO] Performing ML-KEM-768 decapsulation...\n");
+                        } else {
+                            fprintf(stderr, "[v-euicc] BF23: malloc failed for %u bytes\n", smdp_ct_kem_len);
+                        }
+                    } else {
+                        fprintf(stderr, "[v-euicc] BF23: Invalid ciphertext length: %u\n", smdp_ct_kem_len);
+                    }
+                    break;
+                }
+                
+                // Skip current TLV with proper bounds checking
+                if (remaining < 2) break;
+                
+                uint32_t tag_len = ((ptr[0] & 0x1F) == 0x1F) ? 2 : 1;
+                if (remaining < tag_len + 1) break;
+                
+                uint32_t value_len = 0;
+                uint32_t len_field_size = 1;
+                
+                if (ptr[tag_len] < 0x80) {
+                    value_len = ptr[tag_len];
+                } else if (ptr[tag_len] == 0x81 && remaining >= tag_len + 2) {
+                    value_len = ptr[tag_len + 1];
+                    len_field_size = 2;
+                } else if (ptr[tag_len] == 0x82 && remaining >= tag_len + 3) {
+                    value_len = (ptr[tag_len + 1] << 8) | ptr[tag_len + 2];
+                    len_field_size = 3;
+                } else {
+                    fprintf(stderr, "[v-euicc] BF23: Cannot parse length field\n");
+                    break;
+                }
+                
+                uint32_t total_tlv_len = tag_len + len_field_size + value_len;
+                if (total_tlv_len > remaining) {
+                    fprintf(stderr, "[v-euicc] BF23: TLV too large: %u > %u\n", total_tlv_len, remaining);
+                    break;
+                }
+                
+                fprintf(stderr, "[v-euicc] BF23: Skipping TLV (tag_len=%u, value_len=%u)\n", tag_len, value_len);
+                ptr += total_tlv_len;
+                remaining -= total_tlv_len;
+            }
+        }
+#endif
+        
+        // Derive session keys using ECKA (SGP.22 Annex G) or hybrid mode
         if (!state->euicc_otsk || state->euicc_otsk_len != 32) {
             fprintf(stderr, "[v-euicc] BF23: eUICC ephemeral private key not available\n");
             return -1;
         }
         
-        if (derive_session_keys_ecka(state->euicc_otsk, state->euicc_otsk_len,
-                                     state->smdp_otpk, state->smdp_otpk_len,
-                                     state->session_key_enc, state->session_key_mac) < 0) {
-            fprintf(stderr, "[v-euicc] BF23: Session key derivation failed\n");
-            return -1;
+#ifdef ENABLE_PQC
+        if (state->pqc_caps.hybrid_mode_active && smdp_ct_kem && smdp_ct_kem_len > 0 && state->euicc_sk_kem) {
+            fprintf(stderr, "[v-euicc] BF23: Using hybrid key agreement (ECDH + ML-KEM-768)\n");
+            fprintf(stderr, "[v-euicc] BF23: CT length=%u, SK length=%u\n", smdp_ct_kem_len, state->euicc_sk_kem_len);
+            
+            // Step 1: Perform classical ECDH to get Z_ec
+            uint8_t Z_ec[32];
+            // We need to extract just the shared secret from ECDH
+            // Reuse the ECDH computation from derive_session_keys_ecka
+            EC_KEY *euicc_key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+            BIGNUM *priv_bn = BN_bin2bn(state->euicc_otsk, state->euicc_otsk_len, NULL);
+            EC_KEY_set_private_key(euicc_key, priv_bn);
+            BN_free(priv_bn);
+            
+            const EC_GROUP *group = EC_KEY_get0_group(euicc_key);
+            EC_POINT *smdp_point = EC_POINT_new(group);
+            BN_CTX *ctx = BN_CTX_new();
+            EC_POINT_oct2point(group, smdp_point, state->smdp_otpk, state->smdp_otpk_len, ctx);
+            
+            EC_POINT *shared_point = EC_POINT_new(group);
+            const BIGNUM *priv_key = EC_KEY_get0_private_key(euicc_key);
+            EC_POINT_mul(group, shared_point, NULL, smdp_point, priv_key, ctx);
+            
+            BIGNUM *shared_x = BN_new();
+            EC_POINT_get_affine_coordinates(group, shared_point, shared_x, NULL, ctx);
+            memset(Z_ec, 0, 32);
+            int shared_len = BN_num_bytes(shared_x);
+            BN_bn2bin(shared_x, Z_ec + (32 - shared_len));
+            
+            BN_free(shared_x);
+            EC_POINT_free(shared_point);
+            BN_CTX_free(ctx);
+            EC_POINT_free(smdp_point);
+            EC_KEY_free(euicc_key);
+            
+            // Step 2: Perform ML-KEM decapsulation to get Z_kem
+            uint8_t Z_kem[32];
+            uint32_t z_kem_len = 32;
+            
+            if (mlkem_decapsulate(smdp_ct_kem, smdp_ct_kem_len,
+                                 state->euicc_sk_kem, state->euicc_sk_kem_len,
+                                 Z_kem, &z_kem_len) < 0) {
+                fprintf(stderr, "[v-euicc] BF23: ML-KEM decapsulation failed\n");
+                free(smdp_ct_kem);
+                return -1;
+            }
+            
+            free(smdp_ct_kem);
+            
+            // Step 3: Derive session keys using hybrid KDF
+            if (derive_session_keys_hybrid(Z_ec, 32, Z_kem, 32,
+                                          state->session_key_enc,
+                                          state->session_key_mac) < 0) {
+                fprintf(stderr, "[v-euicc] BF23: Hybrid session key derivation failed\n");
+                memset(Z_ec, 0, 32);
+                memset(Z_kem, 0, 32);
+                return -1;
+            }
+            
+            // Detailed PQC demo logging
+            fprintf(stderr, "[PQC-DEMO] Hybrid KDF completed successfully\n");
+            fprintf(stderr, "[PQC-DEMO]   ECDH shared secret: 32 bytes\n");
+            fprintf(stderr, "[PQC-DEMO]   ML-KEM shared secret: 32 bytes\n");
+            fprintf(stderr, "[PQC-DEMO]   Derived KEK: 16 bytes\n");
+            fprintf(stderr, "[PQC-DEMO]   Derived KM: 16 bytes\n");
+            fprintf(stderr, "[PQC-DEMO]   Security: Quantum-resistant (ML-KEM-768 + ECDH P-256)\n");
+            
+            // Securely erase shared secrets
+            memset(Z_ec, 0, 32);
+            memset(Z_kem, 0, 32);
+            
+            // Securely erase ML-KEM private key (no longer needed)
+            memset(state->euicc_sk_kem, 0, state->euicc_sk_kem_len);
+            free(state->euicc_sk_kem);
+            state->euicc_sk_kem = NULL;
+            state->euicc_sk_kem_len = 0;
+            
+            fprintf(stderr, "[v-euicc] BF23: Hybrid session keys derived successfully\n");
+        } else {
+#endif
+            // Classical ECDH-only mode
+            if (derive_session_keys_ecka(state->euicc_otsk, state->euicc_otsk_len,
+                                         state->smdp_otpk, state->smdp_otpk_len,
+                                         state->session_key_enc, state->session_key_mac) < 0) {
+                fprintf(stderr, "[v-euicc] BF23: Session key derivation failed\n");
+                return -1;
+            }
+            fprintf(stderr, "[v-euicc] BF23: Classical session keys derived\n");
+#ifdef ENABLE_PQC
         }
+#endif
         
         state->session_keys_derived = 1;
         state->bpp_commands_received++;
-        fprintf(stderr, "[v-euicc] BF23: Session keys derived, secure channel established\n");
+        fprintf(stderr, "[v-euicc] BF23: Secure channel established\n");
 
         // Build ProfileInstallationResult with success
         // SGP.22: Even intermediate BPP commands must return ProfileInstallationResult
@@ -2311,9 +2570,10 @@ int apdu_handle_transmit(struct euicc_state *state, uint8_t **response, uint32_t
         fprintf(stderr, "[v-euicc] Buffering segment %u (%u bytes)\n", segment_number, es10x_data_len);
         
         // Ensure buffer has enough capacity
+        // Increased headroom to 4096 bytes to handle ML-KEM-768 ciphertext (1088 bytes) + overhead
         uint32_t new_len = state->segment_buffer_len + es10x_data_len;
         if (new_len > state->segment_buffer_capacity) {
-            uint32_t new_capacity = new_len + 512;  // Add some extra space
+            uint32_t new_capacity = new_len + 4096;  // Increased for PQC support
             uint8_t *new_buffer = realloc(state->segment_buffer, new_capacity);
             if (!new_buffer) {
                 fprintf(stderr, "[v-euicc] Failed to allocate segment buffer\n");

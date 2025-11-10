@@ -35,6 +35,26 @@ int derive_session_keys_ecka(const uint8_t *euicc_otsk, uint32_t euicc_otsk_len,
                               const uint8_t *smdp_otpk, uint32_t smdp_otpk_len,
                               uint8_t *session_key_enc, uint8_t *session_key_mac);
 
+#ifdef ENABLE_PQC
+// Generate ML-KEM-768 keypair using liboqs
+// Allocates memory for pk and sk which must be freed by caller
+// Returns 0 on success, -1 on error
+int generate_mlkem_keypair(uint8_t **pk, uint32_t *pk_len,
+                           uint8_t **sk, uint32_t *sk_len);
 
+// Perform ML-KEM-768 decapsulation
+// shared_secret buffer must be at least 32 bytes
+// Returns 0 on success, -1 on error
+int mlkem_decapsulate(const uint8_t *ciphertext, uint32_t ct_len,
+                      const uint8_t *secret_key, uint32_t sk_len,
+                      uint8_t *shared_secret, uint32_t *ss_len);
+
+// Derive session keys using hybrid key agreement (ECDH + ML-KEM)
+// Implements nested KDF for conservative security
+// Returns 0 on success, -1 on error
+int derive_session_keys_hybrid(const uint8_t *Z_ec, uint32_t z_ec_len,
+                               const uint8_t *Z_kem, uint32_t z_kem_len,
+                               uint8_t *kek_out, uint8_t *km_out);
+#endif // ENABLE_PQC
 
 

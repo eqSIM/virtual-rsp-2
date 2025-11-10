@@ -4,9 +4,31 @@
 #include <openssl/ecdsa.h>
 #include <openssl/evp.h>
 #include <openssl/sha.h>
+#include <openssl/kdf.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
+
+#ifdef ENABLE_PQC
+#include <oqs/oqs.h>
+#endif
+
+// Performance profiling macros
+#ifdef ENABLE_PQC
+#define PROFILE_START(name) \
+    struct timeval tv_start_##name, tv_end_##name; \
+    gettimeofday(&tv_start_##name, NULL);
+
+#define PROFILE_END(name) \
+    gettimeofday(&tv_end_##name, NULL); \
+    long elapsed_us_##name = (tv_end_##name.tv_sec - tv_start_##name.tv_sec) * 1000000L + \
+                             (tv_end_##name.tv_usec - tv_start_##name.tv_usec); \
+    fprintf(stderr, "[PROFILE] %s: %ld µs (%.3f ms)\n", #name, elapsed_us_##name, elapsed_us_##name / 1000.0);
+#else
+#define PROFILE_START(name)
+#define PROFILE_END(name)
+#endif
 
 int ecdsa_sign(const uint8_t *data, uint32_t data_len,
                EVP_PKEY *private_key,
@@ -376,4 +398,216 @@ int derive_session_keys_ecka(const uint8_t *euicc_otsk, uint32_t euicc_otsk_len,
     fprintf(stderr, "[crypto] Session keys derived successfully (KEK + KM, 16 bytes each)\n");
     return 0;
 }
+
+#ifdef ENABLE_PQC
+// Generate ML-KEM-768 keypair using liboqs
+int generate_mlkem_keypair(uint8_t **pk, uint32_t *pk_len,
+                           uint8_t **sk, uint32_t *sk_len) {
+    PROFILE_START(mlkem_keypair)
+    
+    if (!pk || !pk_len || !sk || !sk_len) {
+        fprintf(stderr, "[crypto] Invalid parameters for ML-KEM keypair generation\n");
+        return -1;
+    }
+    
+    // Initialize ML-KEM-768
+    OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_768);
+    if (!kem) {
+        fprintf(stderr, "[crypto] Failed to initialize ML-KEM-768\n");
+        return -1;
+    }
+    
+    // Allocate memory for keys
+    *pk = malloc(kem->length_public_key);
+    *sk = malloc(kem->length_secret_key);
+    
+    if (!*pk || !*sk) {
+        fprintf(stderr, "[crypto] Failed to allocate memory for ML-KEM keys\n");
+        free(*pk);
+        free(*sk);
+        OQS_KEM_free(kem);
+        return -1;
+    }
+    
+    // Generate keypair
+    if (OQS_KEM_keypair(kem, *pk, *sk) != OQS_SUCCESS) {
+        fprintf(stderr, "[crypto] ML-KEM keypair generation failed\n");
+        free(*pk);
+        free(*sk);
+        *pk = NULL;
+        *sk = NULL;
+        OQS_KEM_free(kem);
+        return -1;
+    }
+    
+    *pk_len = (uint32_t)kem->length_public_key;  // Should be 1184
+    *sk_len = (uint32_t)kem->length_secret_key;  // Should be 2400
+    
+    fprintf(stderr, "[crypto] ML-KEM-768 keypair generated: pk=%u bytes, sk=%u bytes\n",
+            *pk_len, *sk_len);
+    
+    OQS_KEM_free(kem);
+    
+    PROFILE_END(mlkem_keypair)
+    return 0;
+}
+
+// Perform ML-KEM-768 decapsulation
+int mlkem_decapsulate(const uint8_t *ciphertext, uint32_t ct_len,
+                      const uint8_t *secret_key, uint32_t sk_len,
+                      uint8_t *shared_secret, uint32_t *ss_len) {
+    PROFILE_START(mlkem_decaps)
+    
+    fprintf(stderr, "[crypto] mlkem_decapsulate: ct_len=%u, sk_len=%u\n", ct_len, sk_len);
+    
+    if (!ciphertext || !secret_key || !shared_secret || !ss_len) {
+        fprintf(stderr, "[crypto] mlkem_decapsulate: NULL pointer\n");
+        return -1;
+    }
+    
+    // Initialize ML-KEM-768
+    OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_ml_kem_768);
+    if (!kem) {
+        fprintf(stderr, "[crypto] Failed to initialize ML-KEM-768\n");
+        return -1;
+    }
+    
+    // Verify sizes
+    if (ct_len != kem->length_ciphertext || sk_len != kem->length_secret_key) {
+        fprintf(stderr, "[crypto] ML-KEM size mismatch: ct=%u (expected %zu), sk=%u (expected %zu)\n",
+                ct_len, kem->length_ciphertext, sk_len, kem->length_secret_key);
+        OQS_KEM_free(kem);
+        return -1;
+    }
+    
+    // Decapsulate
+    if (OQS_KEM_decaps(kem, shared_secret, ciphertext, secret_key) != OQS_SUCCESS) {
+        fprintf(stderr, "[crypto] ML-KEM decapsulation failed\n");
+        OQS_KEM_free(kem);
+        return -1;
+    }
+    
+    *ss_len = (uint32_t)kem->length_shared_secret;  // Should be 32
+    
+    fprintf(stderr, "[crypto] ML-KEM-768 decapsulation successful: shared_secret=%u bytes\n", *ss_len);
+    
+    OQS_KEM_free(kem);
+    
+    PROFILE_END(mlkem_decaps)
+    return 0;
+}
+
+// Hybrid KDF using nested approach (NIST SP 800-56C style)
+int derive_session_keys_hybrid(const uint8_t *Z_ec, uint32_t z_ec_len,
+                               const uint8_t *Z_kem, uint32_t z_kem_len,
+                               uint8_t *kek_out, uint8_t *km_out) {
+    PROFILE_START(hybrid_kdf)
+    
+    if (!Z_ec || !Z_kem || !kek_out || !km_out) {
+        fprintf(stderr, "[crypto] Invalid parameters for hybrid KDF\n");
+        return -1;
+    }
+    
+    if (z_ec_len != 32 || z_kem_len != 32) {
+        fprintf(stderr, "[crypto] Hybrid KDF expects 32-byte shared secrets\n");
+        return -1;
+    }
+    
+    // Step 1: Domain-separated extraction of each shared secret
+    // Use HKDF-Extract to derive intermediate keys
+    uint8_t K_ec[32], K_kem[32];
+    
+    // Extract from EC shared secret with label
+    const char *ec_label = "ECDH-P256";
+    EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
+    if (!pctx) {
+        fprintf(stderr, "[crypto] Failed to create HKDF context\n");
+        return -1;
+    }
+    
+    if (EVP_PKEY_derive_init(pctx) <= 0 ||
+        EVP_PKEY_CTX_set_hkdf_md(pctx, EVP_sha256()) <= 0 ||
+        EVP_PKEY_CTX_set1_hkdf_salt(pctx, (const unsigned char *)ec_label, strlen(ec_label)) <= 0 ||
+        EVP_PKEY_CTX_set1_hkdf_key(pctx, Z_ec, z_ec_len) <= 0) {
+        fprintf(stderr, "[crypto] Failed to setup HKDF for EC\n");
+        EVP_PKEY_CTX_free(pctx);
+        return -1;
+    }
+    
+    size_t outlen = 32;
+    if (EVP_PKEY_derive(pctx, K_ec, &outlen) <= 0 || outlen != 32) {
+        fprintf(stderr, "[crypto] Failed to derive K_ec\n");
+        EVP_PKEY_CTX_free(pctx);
+        return -1;
+    }
+    EVP_PKEY_CTX_free(pctx);
+    
+    // Extract from KEM shared secret with label
+    const char *kem_label = "ML-KEM-768";
+    pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
+    if (!pctx) {
+        fprintf(stderr, "[crypto] Failed to create HKDF context for KEM\n");
+        memset(K_ec, 0, 32);
+        return -1;
+    }
+    
+    if (EVP_PKEY_derive_init(pctx) <= 0 ||
+        EVP_PKEY_CTX_set_hkdf_md(pctx, EVP_sha256()) <= 0 ||
+        EVP_PKEY_CTX_set1_hkdf_salt(pctx, (const unsigned char *)kem_label, strlen(kem_label)) <= 0 ||
+        EVP_PKEY_CTX_set1_hkdf_key(pctx, Z_kem, z_kem_len) <= 0) {
+        fprintf(stderr, "[crypto] Failed to setup HKDF for KEM\n");
+        memset(K_ec, 0, 32);
+        EVP_PKEY_CTX_free(pctx);
+        return -1;
+    }
+    
+    outlen = 32;
+    if (EVP_PKEY_derive(pctx, K_kem, &outlen) <= 0 || outlen != 32) {
+        fprintf(stderr, "[crypto] Failed to derive K_kem\n");
+        memset(K_ec, 0, 32);
+        EVP_PKEY_CTX_free(pctx);
+        return -1;
+    }
+    EVP_PKEY_CTX_free(pctx);
+    
+    // Step 2: Combine intermediate keys
+    uint8_t combined[64];
+    memcpy(combined, K_ec, 32);
+    memcpy(combined + 32, K_kem, 32);
+    
+    // Step 3: Final KDF using SGP.22 Annex G format for compatibility
+    // KEK = SHA256(combined || 0x00000001)[0:16]
+    // KM  = SHA256(combined || 0x00000002)[0:16]
+    uint8_t kdf_input[68];  // 64 + 4 for counter
+    memcpy(kdf_input, combined, 64);
+    
+    // Derive KEK
+    kdf_input[64] = 0x00;
+    kdf_input[65] = 0x00;
+    kdf_input[66] = 0x00;
+    kdf_input[67] = 0x01;
+    uint8_t kek_hash[32];
+    SHA256(kdf_input, 68, kek_hash);
+    memcpy(kek_out, kek_hash, 16);
+    
+    // Derive KM
+    kdf_input[67] = 0x02;
+    uint8_t km_hash[32];
+    SHA256(kdf_input, 68, km_hash);
+    memcpy(km_out, km_hash, 16);
+    
+    // Secure cleanup
+    memset(K_ec, 0, 32);
+    memset(K_kem, 0, 32);
+    memset(combined, 0, 64);
+    memset(kdf_input, 0, 68);
+    memset(kek_hash, 0, 32);
+    memset(km_hash, 0, 32);
+    
+    fprintf(stderr, "[crypto] Hybrid session keys derived successfully (nested KDF)\n");
+    
+    PROFILE_END(hybrid_kdf)
+    return 0;
+}
+#endif // ENABLE_PQC
 

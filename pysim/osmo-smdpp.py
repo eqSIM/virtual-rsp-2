@@ -138,8 +138,18 @@ from pySim.esim.es8p import ProfileMetadata,UnprotectedProfilePackage,ProtectedP
 from pySim.esim.x509_cert import oid, cert_policy_has_oid, cert_get_auth_key_id # noqa: E402
 from pySim.esim.x509_cert import CertAndPrivkey, CertificateSet, cert_get_subject_key_id, VerifyError # noqa: E402
 
-import logging # noqa: E402
-logger = logging.getLogger(__name__)
+# Import hybrid key agreement support for PQC
+try:
+    from hybrid_ka import HybridKeyAgreement  # noqa: E402
+    PQC_AVAILABLE = True
+except ImportError:
+    PQC_AVAILABLE = False
+    print("Warning: hybrid_ka module not found, PQC support disabled in SM-DP+")
+
+# Note: logger is already imported from vrsp_logging on line 28
+# Don't override it with unconfigured standard logger
+# import logging # noqa: E402
+# logger = logging.getLogger(__name__)
 
 # HACK: make this configurable
 DATA_DIR = './smdpp-data'
@@ -458,6 +468,47 @@ class SmDppHttpServer:
             return False
 
     @staticmethod
+    def _extract_tlv(data: bytes, tag: int) -> Optional[bytes]:
+        """Extract TLV value from BER-TLV encoded data. Returns None if tag not found."""
+        i = 0
+        while i < len(data):
+            # Parse tag (supports single-byte and two-byte tags)
+            if i >= len(data):
+                break
+            t = data[i]
+            i += 1
+            if (t & 0x1F) == 0x1F:  # Two-byte tag
+                if i >= len(data):
+                    break
+                t = (t << 8) | data[i]
+                i += 1
+            
+            # Parse length
+            if i >= len(data):
+                break
+            length = data[i]
+            i += 1
+            if length & 0x80:  # Long form
+                num_bytes = length & 0x7F
+                if i + num_bytes > len(data):
+                    break
+                length = 0
+                for _ in range(num_bytes):
+                    length = (length << 8) | data[i]
+                    i += 1
+            
+            # Check if this is the tag we're looking for
+            if t == tag:
+                if i + length > len(data):
+                    return None
+                return data[i:i+length]
+            
+            # Skip value
+            i += length
+        
+        return None
+
+    @staticmethod
     def rsp_api_wrapper(func):
         """Wrapper that can be used as decorator in order to perform common REST API endpoint entry/exit
         functionality, such as JSON decoding/encoding and debug-printing."""
@@ -730,21 +781,82 @@ class SmDppHttpServer:
         ss.euicc_otpk = euiccSigned2['euiccOtpk']
         logger.debug("euiccOtpk: %s" % (b2h(ss.euicc_otpk)))
 
-        # Generate a one-time ECKA key pair (ot{PK,SK}.DP.ECKA) using the curve indicated by the Key Parameter
-        # Reference value of CERT.DPpb.ECDDSA
-        logger.debug("curve = %s" % self.dp_pb.get_curve())
-        ss.smdp_ot = ec.generate_private_key(self.dp_pb.get_curve())
-        # extract the public key in (hopefully) the right format for the ES8+ interface
-        ss.smdp_otpk = ss.smdp_ot.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
-        logger.debug("smdpOtpk: %s" % b2h(ss.smdp_otpk))
-        logger.debug("smdpOtsk: %s" % b2h(ss.smdp_ot.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())))
+        # Check for ML-KEM public key (tag 0x5F4A) for hybrid mode
+        # The ML-KEM public key is inside euiccSigned2 SEQUENCE
+        # euiccSigned2 structure: 30 { 80 (transactionId), 5F49 (euiccOtpk), 5F4A (ML-KEM pk), ... }
+        # We need to skip the SEQUENCE wrapper (tag 30) and search inside
+        logger.debug(f"[PQC-DEBUG] euiccSigned2_bin length: {len(euiccSigned2_bin)}")
+        logger.debug(f"[PQC-DEBUG] euiccSigned2_bin hex (first 100 bytes): {b2h(euiccSigned2_bin[:100])}")
+        
+        # Skip SEQUENCE wrapper (tag 30) to search inside
+        euicc_pk_kem = None
+        if len(euiccSigned2_bin) > 3 and euiccSigned2_bin[0] == 0x30:
+            # Parse length to find where content starts
+            i = 1
+            if euiccSigned2_bin[i] & 0x80:  # Long form
+                num_bytes = euiccSigned2_bin[i] & 0x7F
+                i += 1 + num_bytes
+            else:  # Short form
+                i += 1
+            logger.debug(f"[PQC-DEBUG] Skipping SEQUENCE wrapper, searching from byte {i}...")
+            euicc_pk_kem = self._extract_tlv(euiccSigned2_bin[i:], 0x5F4A)
+        
+        logger.debug(f"[PQC-DEBUG] _extract_tlv(0x5F4A) returned: {len(euicc_pk_kem) if euicc_pk_kem else 'None'}")
+        if euicc_pk_kem:
+            logger.info(f"[PQC] eUICC ML-KEM-768 public key detected ({len(euicc_pk_kem)} bytes), enabling hybrid mode")
+            logger.info(f"[PQC-DEMO] getBoundProfilePackage: eUICC ML-KEM public key detected")
+            logger.info(f"[PQC-DEMO]   Size: {len(euicc_pk_kem)} bytes (expected 1184 for ML-KEM-768)")
+            logger.info(f"[PQC-DEMO]   Tag: 0x5F4A from PrepareDownload response")
+            logger.info(f"[PQC-DEMO]   First 32 bytes: {b2h(euicc_pk_kem[:32])}...")
+            ss.euicc_pk_kem = euicc_pk_kem
+            ss.hybrid_mode = True
+        else:
+            logger.info("[PQC] No ML-KEM public key detected, using classical mode")
+            ss.euicc_pk_kem = None
+            ss.hybrid_mode = False
 
         ss.host_id = b'mahlzeit'
 
-        # Generate Session Keys using the CRT, otPK.eUICC.ECKA and otSK.DP.ECKA according to annex G
-        euicc_public_key = ec.EllipticCurvePublicKey.from_encoded_point(ss.smdp_ot.curve, ss.euicc_otpk)
-        ss.shared_secret = ss.smdp_ot.exchange(ec.ECDH(), euicc_public_key)
-        logger.debug("shared_secret: %s" % b2h(ss.shared_secret))
+        # Perform key agreement (hybrid or classical)
+        if PQC_AVAILABLE and ss.hybrid_mode:
+            # Hybrid key agreement using ECDH + ML-KEM-768
+            logger.info("[PQC] Performing hybrid key agreement (ECDH + ML-KEM-768)")
+            ka = HybridKeyAgreement(enable_pqc=True)
+            ss.smdp_otpk, ss.smdp_ct_kem, kek, km = ka.perform_key_agreement(ss.euicc_otpk, ss.euicc_pk_kem)
+            
+            logger.debug(f"[PQC] smdpOtpk: {b2h(ss.smdp_otpk)}")
+            logger.debug(f"[PQC] smdpCtKem: {b2h(ss.smdp_ct_kem) if ss.smdp_ct_kem else 'None'}")
+            logger.debug(f"[PQC] KEK: {b2h(kek)}")
+            logger.debug(f"[PQC] KM: {b2h(km)}")
+            
+            # Detailed PQC demo logging
+            logger.info(f"[PQC-DEMO] Hybrid key agreement completed")
+            logger.info(f"[PQC-DEMO]   ECDH public key (smdpOtpk): {len(ss.smdp_otpk)} bytes")
+            logger.info(f"[PQC-DEMO]   ML-KEM ciphertext (tag 0x5F4B): {len(ss.smdp_ct_kem)} bytes")
+            logger.info(f"[PQC-DEMO]   KEK: {len(kek)} bytes, KM: {len(km)} bytes")
+            logger.info(f"[PQC-DEMO]   Security: Hybrid PQC (ECDH + ML-KEM-768)")
+            
+            # For hybrid mode, we need to recompute shared_secret for BSP compatibility
+            # This is a workaround since BspInstance.from_kdf expects the raw shared secret
+            # In hybrid mode, we combine Z_ec and Z_kem, but for BSP we use the derived KEK+KM
+            # For now, we'll create a synthetic shared_secret from KEK||KM
+            ss.shared_secret = kek + km  # 32 bytes total
+            logger.debug(f"[PQC] Hybrid shared_secret (KEK||KM): {b2h(ss.shared_secret)}")
+        else:
+            # Classical key agreement using ECDH only
+            logger.info("[PQC] Performing classical key agreement (ECDH only)")
+            logger.debug("curve = %s" % self.dp_pb.get_curve())
+            ss.smdp_ot = ec.generate_private_key(self.dp_pb.get_curve())
+            # extract the public key in (hopefully) the right format for the ES8+ interface
+            ss.smdp_otpk = ss.smdp_ot.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+            logger.debug("smdpOtpk: %s" % b2h(ss.smdp_otpk))
+            logger.debug("smdpOtsk: %s" % b2h(ss.smdp_ot.private_bytes(Encoding.DER, PrivateFormat.PKCS8, NoEncryption())))
+            
+            # Generate Session Keys using the CRT, otPK.eUICC.ECKA and otSK.DP.ECKA according to annex G
+            euicc_public_key = ec.EllipticCurvePublicKey.from_encoded_point(ss.smdp_ot.curve, ss.euicc_otpk)
+            ss.shared_secret = ss.smdp_ot.exchange(ec.ECDH(), euicc_public_key)
+            logger.debug("shared_secret: %s" % b2h(ss.shared_secret))
+            ss.smdp_ct_kem = None
 
         # TODO: Check if this order requires a Confirmation Code verification
 

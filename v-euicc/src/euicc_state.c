@@ -47,6 +47,19 @@ void euicc_state_init(struct euicc_state *state) {
     memset(state->session_key_enc, 0, sizeof(state->session_key_enc));
     memset(state->session_key_mac, 0, sizeof(state->session_key_mac));
     state->session_keys_derived = 0;
+    
+    // Initialize PQC capabilities and ML-KEM keys
+#ifdef ENABLE_PQC
+    state->pqc_caps.mlkem768_supported = true;  // Enabled at compile time
+    state->pqc_caps.hybrid_mode_active = false; // Will be set during protocol
+#else
+    state->pqc_caps.mlkem768_supported = false;
+    state->pqc_caps.hybrid_mode_active = false;
+#endif
+    state->euicc_pk_kem = NULL;
+    state->euicc_pk_kem_len = 0;
+    state->euicc_sk_kem = NULL;
+    state->euicc_sk_kem_len = 0;
 
     // Initialize profile storage
     state->bound_profile_package = NULL;
@@ -104,6 +117,18 @@ void euicc_state_reset(struct euicc_state *state) {
     memset(state->session_key_enc, 0, sizeof(state->session_key_enc));
     memset(state->session_key_mac, 0, sizeof(state->session_key_mac));
     state->session_keys_derived = 0;
+    
+    // Free ML-KEM keys (securely wipe before freeing)
+    if (state->euicc_sk_kem) {
+        memset(state->euicc_sk_kem, 0, state->euicc_sk_kem_len);
+        free(state->euicc_sk_kem);
+    }
+    free(state->euicc_pk_kem);
+    state->euicc_pk_kem = NULL;
+    state->euicc_pk_kem_len = 0;
+    state->euicc_sk_kem = NULL;
+    state->euicc_sk_kem_len = 0;
+    state->pqc_caps.hybrid_mode_active = false;
 
     // Free profile storage
     free(state->bound_profile_package);

@@ -11,3 +11,10 @@ add_subdirectory(lpac)
 # Build v-euicc daemon
 add_subdirectory(v-euicc)
 
+# Build tests (optional, can be disabled)
+option(BUILD_TESTS "Build test suite" ON)
+if(BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
+

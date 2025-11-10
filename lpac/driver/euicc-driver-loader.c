@@ -9,6 +9,7 @@
 #endif
 
 #include <dirent.h>
+#include <errno.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -211,25 +212,47 @@ static char *get_first_runpath() {
 }
 
 static char *get_driver_path() {
+    // Check for environment variable override first
+    const char *env_path = getenv("LPAC_DRIVER_PATH");
+    if (env_path != NULL) {
+        fprintf(stderr, "[lpac-driver] Using LPAC_DRIVER_PATH: %s\n", env_path);
+        return strdup(env_path);
+    }
+    
     _cleanup_free_ char *LPAC_DRIVER_HOME = get_first_runpath();
-    if (LPAC_DRIVER_HOME == NULL)
+    if (LPAC_DRIVER_HOME == NULL) {
+        fprintf(stderr, "[lpac-driver] get_first_runpath() returned NULL\n");
         return NULL;
-    return path_concat(LPAC_DRIVER_HOME, "driver");
+    }
+    char *driver_path = path_concat(LPAC_DRIVER_HOME, "driver");
+    fprintf(stderr, "[lpac-driver] Computed driver path: %s\n", driver_path ? driver_path : "NULL");
+    return driver_path;
 }
 
 static const struct euicc_driver *find_driver_by_path(const char *restrict dir, char *restrict name) {
     _cleanup_free_ char *driver_path = path_concat(dir, name);
+    fprintf(stderr, "[lpac-driver] Trying to load: %s\n", driver_path ? driver_path : "NULL");
+    
     if (access(driver_path, R_OK) != 0) {
+        fprintf(stderr, "[lpac-driver]   File not accessible: %s\n", strerror(errno));
         return NULL;
     }
+    
     void *handle = dlopen(driver_path, RTLD_NOW);
     if (handle == NULL) {
+        fprintf(stderr, "[lpac-driver]   dlopen failed: %s\n", dlerror());
         return NULL;
     }
+    
     struct euicc_driver *driver = dlsym(handle, "driver_if");
     if (driver == NULL) {
+        fprintf(stderr, "[lpac-driver]   driver_if symbol not found: %s\n", dlerror());
         dlclose(handle);
+        return NULL;
     }
+    
+    fprintf(stderr, "[lpac-driver]   Successfully loaded driver: %s (type=%d)\n", 
+            driver->name ? driver->name : "unknown", driver->type);
     return driver;
 }
 
