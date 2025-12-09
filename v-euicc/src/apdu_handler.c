@@ -5,6 +5,7 @@
 #include <openssl/evp.h>
 #include <openssl/ec.h>
 #include <openssl/bn.h>
+#include <openssl/x509.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -588,8 +589,11 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
         //     serverCertificate, ctxParams1
         // }
         
-        // For mock: we need to extract transactionID and build response
-        // Real implementation would verify signatures and certificates
+        // Extract and verify server certificate and signature
+        // AuthenticateServerRequest structure: BF38 {
+        //     serverSigned1 (0x30), serverSignature1 (0x5F37), 
+        //     euiccCiPKIdToBeUsed, serverCertificate (0x30), ctxParams1 (0xA0)
+        // }
         
         // Extract transactionID, serverChallenge, serverAddress, and matchingID from request
         const uint8_t *ptr = command;
@@ -683,7 +687,129 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
             remaining--;
         }
         
-        // Build mock AuthenticateServerResponse
+        // Extract serverSigned1, serverSignature1, and serverCertificate for verification
+        const uint8_t *server_signed1 = NULL;
+        uint32_t server_signed1_len = 0;
+        const uint8_t *server_signature1 = NULL;
+        uint32_t server_signature1_len = 0;
+        const uint8_t *server_cert = NULL;
+        uint32_t server_cert_len = 0;
+        
+        // Parse BF38 structure to find serverSigned1 (first 0x30), serverSignature1 (0x5F37), and serverCertificate (second 0x30)
+        ptr = command;
+        remaining = command_len;
+        
+        // Skip BF38 tag and length
+        if (remaining > 2 && ptr[0] == 0xBF && ptr[1] == 0x38) {
+            ptr += 2;
+            remaining -= 2;
+            
+            // Skip length field
+            if (remaining > 0) {
+                uint8_t len_byte = ptr[0];
+                if (len_byte < 0x80) {
+                    ptr += 1;
+                    remaining -= 1;
+                } else if (len_byte == 0x81 && remaining >= 2) {
+                    ptr += 2;
+                    remaining -= 2;
+                } else if (len_byte == 0x82 && remaining >= 3) {
+                    ptr += 3;
+                    remaining -= 3;
+                }
+            }
+            
+            // Now parse the content: serverSigned1 (0x30), serverSignature1 (0x5F37), serverCertificate (0x30)
+            int found_signed1 = 0;
+            int found_signature = 0;
+            int found_cert = 0;
+            
+            while (remaining > 2 && (!found_signed1 || !found_signature || !found_cert)) {
+                if (ptr[0] == 0x30 && !found_signed1) {
+                    // Found serverSigned1
+                    uint8_t len = ptr[1];
+                    if (len < 0x80 && remaining >= 2 + len) {
+                        server_signed1 = ptr;
+                        server_signed1_len = 2 + len;
+                        found_signed1 = 1;
+                        ptr += server_signed1_len;
+                        remaining -= server_signed1_len;
+                        continue;
+                    }
+                } else if (ptr[0] == 0x5F && ptr[1] == 0x37 && !found_signature) {
+                    // Found serverSignature1
+                    uint8_t len = ptr[2];
+                    if (len < 0x80 && remaining >= 3 + len) {
+                        server_signature1 = ptr + 3;  // Skip tag and length
+                        server_signature1_len = len;
+                        found_signature = 1;
+                        ptr += 3 + len;
+                        remaining -= 3 + len;
+                        continue;
+                    }
+                } else if (ptr[0] == 0x30 && found_signed1 && !found_cert) {
+                    // Found serverCertificate (second 0x30 after serverSigned1)
+                    uint8_t len = ptr[1];
+                    if (len < 0x80 && remaining >= 2 + len) {
+                        server_cert = ptr + 2;  // Skip tag and length
+                        server_cert_len = len;
+                        found_cert = 1;
+                        break;
+                    }
+                }
+                
+                // Skip unknown fields
+                if (remaining > 0) {
+                    ptr++;
+                    remaining--;
+                } else {
+                    break;
+                }
+            }
+            
+            // Verify signature if we found all components
+            if (found_signed1 && found_signature && found_cert && server_signature1_len == 64) {
+                // Load server certificate
+                const uint8_t *cert_ptr = server_cert;
+                X509 *x509_cert = d2i_X509(NULL, &cert_ptr, server_cert_len);
+                
+                if (x509_cert) {
+                    // Extract public key from certificate
+                    EVP_PKEY *server_pubkey = X509_get_pubkey(x509_cert);
+                    
+                    if (server_pubkey) {
+                        // Verify signature over serverSigned1
+                        int verify_result = ecdsa_verify(server_signed1, server_signed1_len,
+                                                         server_signature1, server_signature1_len,
+                                                         server_pubkey);
+                        
+                        if (verify_result == 0) {
+                            LOG_V_EUICC_INFO("Server signature verified successfully");
+                        } else {
+                            fprintf(stderr, "[v-euicc] WARNING: Server signature verification failed (continuing anyway)\n");
+                            // Note: We continue for now, but in production this should fail
+                        }
+                        
+                        EVP_PKEY_free(server_pubkey);
+                    } else {
+                        fprintf(stderr, "[v-euicc] WARNING: Failed to extract public key from server certificate\n");
+                    }
+                    
+                    X509_free(x509_cert);
+                } else {
+                    fprintf(stderr, "[v-euicc] WARNING: Failed to parse server certificate\n");
+                }
+            } else {
+                if (!found_signed1) fprintf(stderr, "[v-euicc] WARNING: serverSigned1 not found\n");
+                if (!found_signature) fprintf(stderr, "[v-euicc] WARNING: serverSignature1 not found\n");
+                if (!found_cert) fprintf(stderr, "[v-euicc] WARNING: serverCertificate not found\n");
+                if (found_signature && server_signature1_len != 64) {
+                    fprintf(stderr, "[v-euicc] WARNING: Invalid signature length: %u (expected 64)\n", server_signature1_len);
+                }
+            }
+        }
+        
+        // Build AuthenticateServerResponse
         // AuthenticateServerResponse ::= BF38 { A0 {
         //     euiccSigned1, euiccSignature1, euiccCertificate, eumCertificate
         // }}

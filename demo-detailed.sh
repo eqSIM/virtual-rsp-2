@@ -65,7 +65,10 @@ echo -e "${BLUE}▶${NC} Starting v-euicc daemon (classical mode)..."
 ./build/v-euicc/v-euicc-daemon-classical 8765 > /tmp/detailed-euicc.log 2>&1 &
 EUICC_PID=$!
 sleep 2
-[ ! kill -0 $EUICC_PID 2>/dev/null ] && echo -e "${RED}✗${NC} Failed to start v-euicc" && exit 1
+if ! kill -0 $EUICC_PID 2>/dev/null; then
+    echo -e "${RED}✗${NC} Failed to start v-euicc"
+    exit 1
+fi
 echo -e "${GREEN}✓${NC} v-euicc started (classical mode, PID: $EUICC_PID)"
 
 # Configure hosts
@@ -84,7 +87,10 @@ nginx -c "$PWD/nginx-smdpp.conf" -p "$PWD" > /tmp/detailed-nginx.log 2>&1 &
 NGINX_PID=$!
 cd ..
 sleep 4
-[ ! kill -0 $SMDPP_PID 2>/dev/null ] && echo -e "${RED}✗${NC} Failed to start SM-DP+" && exit 1
+if ! kill -0 $SMDPP_PID 2>/dev/null; then
+    echo -e "${RED}✗${NC} Failed to start SM-DP+"
+    exit 1
+fi
 echo -e "${GREEN}✓${NC} SM-DP+ and nginx started"
 
 # Setup lpac environment
@@ -160,7 +166,7 @@ sleep 3
 # Extract authentication details from logs
 echo
 echo -e "${CYAN}→${NC} ${BOLD}Phase 2: AuthenticateServer (ES10b)${NC}"
-echo -e "${DIM}   eUICC verifies SM-DP+ certificate and generates challenge response${NC}"
+echo -e "${DIM}   eUICC processes SM-DP+ authentication request and generates challenge response${NC}"
 
 # Wait a bit more for authentication
 sleep 2
@@ -172,14 +178,27 @@ if grep -q "ES10x command tag: BF38" /tmp/detailed-euicc.log; then
     
     # Extract server address
     SERVER_ADDR=$(grep "Extracted serverAddress:" /tmp/detailed-euicc.log | tail -1 | awk -F': ' '{print $2}' | awk '{print $1}')
-    echo -e "   ${YELLOW}Server Address:${NC} $SERVER_ADDR"
+    if [ ! -z "$SERVER_ADDR" ]; then
+        echo -e "   ${YELLOW}Server Address:${NC} $SERVER_ADDR"
+    fi
+    
+    # Check for server signature verification
+    if grep -q "Server signature verified successfully" /tmp/detailed-euicc.log; then
+        echo -e "   ${GREEN}✓${NC} SM-DP+ signature verified"
+    elif grep -q "Server signature verification failed" /tmp/detailed-euicc.log; then
+        echo -e "   ${RED}✗${NC} SM-DP+ signature verification failed"
+    else
+        echo -e "   ${YELLOW}⚠${NC} SM-DP+ signature verification not performed"
+    fi
     
     # Check for signature generation
     if grep -q "AuthenticateServer: Real ECDSA signature generated" /tmp/detailed-euicc.log; then
         SIG_SIZE=$(grep "AuthenticateServer: Real ECDSA signature generated" /tmp/detailed-euicc.log | tail -1 | grep -o '[0-9]* bytes' | awk '{print $1}')
-        echo -e "   ${GREEN}✓${NC} ECDSA signature generated: ${YELLOW}$SIG_SIZE bytes${NC}"
-        echo -e "   ${DIM}   Algorithm: ECDSA with NIST P-256 curve${NC}"
-        echo -e "   ${DIM}   Format: TR-03111 raw format (R || S, 32+32 bytes)${NC}"
+        if [ ! -z "$SIG_SIZE" ]; then
+            echo -e "   ${GREEN}✓${NC} ECDSA signature generated: ${YELLOW}$SIG_SIZE bytes${NC}"
+            echo -e "   ${DIM}   Algorithm: ECDSA with NIST P-256 curve${NC}"
+            echo -e "   ${DIM}   Format: TR-03111 raw format (R || S, 32+32 bytes)${NC}"
+        fi
     fi
 fi
 
@@ -216,16 +235,20 @@ if grep -q "PrepareDownloadRequest received" /tmp/detailed-euicc.log; then
     # Extract ephemeral key generation
     if grep -q "Generated valid euiccOtpk:" /tmp/detailed-euicc.log; then
         OTPK_PREVIEW=$(grep "Generated valid euiccOtpk:" /tmp/detailed-euicc.log | tail -1 | awk -F': ' '{print $2}')
-        echo -e "   ${GREEN}✓${NC} Generated ephemeral key pair (otPK/otSK.EUICC.ECKA)"
-        echo -e "   ${YELLOW}Public Key (otPK.EUICC.ECKA):${NC} $OTPK_PREVIEW"
-        echo -e "   ${DIM}   Curve: NIST P-256 (secp256r1)${NC}"
-        echo -e "   ${DIM}   Format: Uncompressed point (04 || X || Y), 65 bytes${NC}"
+        if [ ! -z "$OTPK_PREVIEW" ]; then
+            echo -e "   ${GREEN}✓${NC} Generated ephemeral key pair (otPK/otSK.EUICC.ECKA)"
+            echo -e "   ${YELLOW}Public Key (otPK.EUICC.ECKA):${NC} $OTPK_PREVIEW"
+            echo -e "   ${DIM}   Curve: NIST P-256 (secp256r1)${NC}"
+            echo -e "   ${DIM}   Format: Uncompressed point (04 || X || Y), 65 bytes${NC}"
+        fi
     fi
     
     # Check for signature
     if grep -q "PrepareDownload: Signature generated" /tmp/detailed-euicc.log; then
         SIG_INFO=$(grep "PrepareDownload: Signature generated" /tmp/detailed-euicc.log | tail -1 | grep -o '([0-9]* bytes) over [0-9]* bytes')
-        echo -e "   ${GREEN}✓${NC} ECDSA signature: $SIG_INFO"
+        if [ ! -z "$SIG_INFO" ]; then
+            echo -e "   ${GREEN}✓${NC} ECDSA signature: $SIG_INFO"
+        fi
     fi
 fi
 
@@ -245,7 +268,9 @@ if grep -q "ES10x command tag: BF36" /tmp/detailed-euicc.log; then
     echo -e "   ${GREEN}✓${NC} BoundProfilePackage received"
     
     BPP_SIZE=$(grep "BF36 wrapper detected" /tmp/detailed-euicc.log | tail -1 | grep -o 'len=[0-9]*' | cut -d= -f2)
-    echo -e "   ${YELLOW}BPP Size:${NC} $BPP_SIZE bytes"
+    if [ ! -z "$BPP_SIZE" ]; then
+        echo -e "   ${YELLOW}BPP Size:${NC} $BPP_SIZE bytes"
+    fi
 fi
 
 echo
@@ -258,9 +283,11 @@ if grep -q "InitialiseSecureChannelRequest (BF23) received" /tmp/detailed-euicc.
     echo -e "   ${GREEN}✓${NC} InitialiseSecureChannel command received"
     
     # Extract smdpOtpk
-    if grep -q "Extracted smdpOtpk" /tmp/detailed-euicc.log; then
-        SMDP_OTPK_SIZE=$(grep "Extracted smdpOtpk" /tmp/detailed-euicc.log | tail -1 | grep -o '[0-9]* bytes' | awk '{print $1}')
-        echo -e "   ${YELLOW}SM-DP+ Public Key (otPK.DP.ECKA):${NC} $SMDP_OTPK_SIZE bytes"
+    if grep -q "Extracted smdpOtpk\|BF23: Extracted smdpOtpk" /tmp/detailed-euicc.log; then
+        SMDP_OTPK_SIZE=$(grep "Extracted smdpOtpk\|BF23: Extracted smdpOtpk" /tmp/detailed-euicc.log | tail -1 | grep -o '[0-9]* bytes' | awk '{print $1}')
+        if [ ! -z "$SMDP_OTPK_SIZE" ]; then
+            echo -e "   ${YELLOW}SM-DP+ Public Key (otPK.DP.ECKA):${NC} $SMDP_OTPK_SIZE bytes"
+        fi
     fi
     
     # Check for session key derivation
@@ -270,7 +297,9 @@ if grep -q "InitialiseSecureChannelRequest (BF23) received" /tmp/detailed-euicc.
         echo -e "   ${DIM}   1. ECDH shared secret = otSK.EUICC.ECKA × otPK.DP.ECKA${NC}"
         echo -e "   ${DIM}   2. KDF (SHA-256 based) derives KEK and KM${NC}"
         KEY_INFO=$(grep "Session keys derived successfully" /tmp/detailed-euicc.log | tail -1 | grep -o '([^)]*)')
-        echo -e "   ${YELLOW}Derived Keys:${NC} $KEY_INFO"
+        if [ ! -z "$KEY_INFO" ]; then
+            echo -e "   ${YELLOW}Derived Keys:${NC} $KEY_INFO"
+        fi
         echo -e "   ${DIM}   • KEK (Key Encryption Key): 16 bytes${NC}"
         echo -e "   ${DIM}   • KM (Key for MAC): 16 bytes${NC}"
     fi
@@ -286,18 +315,18 @@ echo -e "   ${YELLOW}Total BPP commands processed:${NC} $BPP_COUNT"
 # Show command breakdown
 echo
 echo -e "   ${DIM}Command breakdown:${NC}"
-grep "BPP.*command 00" /tmp/detailed-euicc.log | tail -20 | while read line; do
-    if echo "$line" | grep -q "00A0"; then
+grep "BPP data command" /tmp/detailed-euicc.log | tail -20 | while read line; do
+    if echo "$line" | grep -q "00A0\|A0"; then
         echo -e "   ${GREEN}✓${NC} A0 (ConfigureISDP) - Configure ISD-P applet"
-    elif echo "$line" | grep -q "00A1"; then
+    elif echo "$line" | grep -q "00A1\|A1"; then
         echo -e "   ${GREEN}✓${NC} A1 (StoreMetadata) - Store profile metadata"
-    elif echo "$line" | grep -q "0088"; then
+    elif echo "$line" | grep -q "0088\|88"; then
         echo -e "   ${GREEN}✓${NC} 88 (StoreMetadata data) - MAC-protected metadata"
-    elif echo "$line" | grep -q "00A2"; then
+    elif echo "$line" | grep -q "00A2\|A2"; then
         echo -e "   ${GREEN}✓${NC} A2 (ReplaceSessionKeys) - Update session keys with PPK"
-    elif echo "$line" | grep -q "0086"; then
+    elif echo "$line" | grep -q "0086\|86"; then
         echo -e "   ${GREEN}✓${NC} 86 (LoadProfileElements) - Encrypted profile data"
-    elif echo "$line" | grep -q "00A3"; then
+    elif echo "$line" | grep -q "00A3\|A3"; then
         echo -e "   ${GREEN}✓${NC} A3 (Final) - Complete profile installation"
     fi
 done | sort -u
@@ -325,20 +354,31 @@ if grep -q "Created profile metadata:" /tmp/detailed-euicc.log; then
     
     PROFILE_INFO=$(grep "Created profile metadata:" /tmp/detailed-euicc.log | tail -1)
     ICCID=$(echo "$PROFILE_INFO" | grep -o 'ICCID=[^,]*' | cut -d= -f2)
-    PROF_NAME=$(echo "$PROFILE_INFO" | grep -o 'Name=.*' | cut -d= -f2)
+    PROF_NAME=$(echo "$PROFILE_INFO" | grep -o 'Name=[^,]*' | cut -d= -f2)
     
-    echo -e "   ${YELLOW}ICCID:${NC} $ICCID"
-    echo -e "   ${YELLOW}Profile Name:${NC} $PROF_NAME"
-    echo -e "   ${YELLOW}Service Provider:${NC} OsmocomSPN"
+    if [ ! -z "$ICCID" ]; then
+        echo -e "   ${YELLOW}ICCID:${NC} $ICCID"
+    fi
+    if [ ! -z "$PROF_NAME" ]; then
+        echo -e "   ${YELLOW}Profile Name:${NC} $PROF_NAME"
+    fi
+    # Extract service provider from logs if available, otherwise show default
+    SP_NAME=$(grep -i "service provider\|spn" /tmp/detailed-smdpp.log 2>/dev/null | tail -1 | grep -o '[A-Za-z0-9]*SPN' | head -1)
+    if [ -z "$SP_NAME" ]; then
+        SP_NAME="OsmocomSPN"
+    fi
+    echo -e "   ${YELLOW}Service Provider:${NC} $SP_NAME"
     echo -e "   ${YELLOW}State:${NC} Disabled (default)"
     
     # Show ProfileInstallationResult
     if grep -q "ProfileInstallationResult built successfully" /tmp/detailed-euicc.log; then
         PIR_SIZE=$(grep "ProfileInstallationResult built successfully" /tmp/detailed-euicc.log | tail -1 | grep -o '[0-9]* bytes' | awk '{print $1}')
-        echo
-        echo -e "   ${CYAN}ProfileInstallationResult (BF37):${NC} $PIR_SIZE bytes"
-        echo -e "   ${DIM}   Structure: BF37 { BF27 { transactionId, notificationMetadata, ${NC}"
-        echo -e "   ${DIM}              smdpOid, finalResult }, euiccSignPIR }${NC}"
+        if [ ! -z "$PIR_SIZE" ]; then
+            echo
+            echo -e "   ${CYAN}ProfileInstallationResult (BF37):${NC} $PIR_SIZE bytes"
+            echo -e "   ${DIM}   Structure: BF37 { BF27 { transactionId, notificationMetadata, ${NC}"
+            echo -e "   ${DIM}              smdpOid, finalResult }, euiccSignPIR }${NC}"
+        fi
     fi
 fi
 
@@ -351,12 +391,17 @@ echo
 # Count signatures
 SIG_COUNT=$(grep -c "DER signature generated:" /tmp/detailed-euicc.log 2>/dev/null || echo "0")
 ECDH_COUNT=$(grep -c "Session keys derived" /tmp/detailed-euicc.log 2>/dev/null || echo "0")
+CERT_VERIFY_COUNT=$(grep -c "Server signature verified successfully\|Signature verified successfully" /tmp/detailed-euicc.log 2>/dev/null || echo "0")
 
 echo -e "${YELLOW}Cryptographic Operations Performed:${NC}"
 echo -e "   • ECDSA Signatures Generated: ${GREEN}$SIG_COUNT${NC}"
 echo -e "   • ECDH Key Agreements: ${GREEN}$ECDH_COUNT${NC}"
-echo -e "   • Certificates Verified: ${GREEN}2+${NC} (eUICC chain, SM-DP+ chain)"
-echo -e "   • Session Keys Derived: ${GREEN}2${NC} (KEK, KM)"
+if [ "$CERT_VERIFY_COUNT" -gt 0 ]; then
+    echo -e "   • Certificates/Signatures Verified: ${GREEN}$CERT_VERIFY_COUNT${NC}"
+else
+    echo -e "   • Certificates Verified: ${YELLOW}0${NC} (verification not implemented)"
+fi
+echo -e "   • Session Keys Derived: ${GREEN}$ECDH_COUNT${NC} (KEK, KM)"
 echo -e "   • BPP Commands Processed: ${GREEN}$BPP_COUNT${NC}"
 
 echo

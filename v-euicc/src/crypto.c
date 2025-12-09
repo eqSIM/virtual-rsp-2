@@ -5,6 +5,7 @@
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 #include <openssl/kdf.h>
+#include <openssl/x509.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -397,6 +398,97 @@ int derive_session_keys_ecka(const uint8_t *euicc_otsk, uint32_t euicc_otsk_len,
 
     fprintf(stderr, "[crypto] Session keys derived successfully (KEK + KM, 16 bytes each)\n");
     return 0;
+}
+
+int ecdsa_verify(const uint8_t *data, uint32_t data_len,
+                 const uint8_t *signature, uint32_t signature_len,
+                 EVP_PKEY *public_key) {
+    if (!data || !signature || !public_key) {
+        fprintf(stderr, "[crypto] Invalid parameters for ECDSA verification\n");
+        return -1;
+    }
+    
+    if (signature_len != 64) {
+        fprintf(stderr, "[crypto] Invalid signature length: expected 64 bytes (TR-03111 format), got %u\n", signature_len);
+        return -1;
+    }
+    
+    // Convert TR-03111 format (64 bytes: R || S) to DER format for OpenSSL
+    // Extract R and S (each 32 bytes)
+    const uint8_t *r_bytes = signature;
+    const uint8_t *s_bytes = signature + 32;
+    
+    // Create BIGNUMs from R and S
+    BIGNUM *r = BN_bin2bn(r_bytes, 32, NULL);
+    BIGNUM *s = BN_bin2bn(s_bytes, 32, NULL);
+    
+    if (!r || !s) {
+        fprintf(stderr, "[crypto] Failed to create BIGNUMs from signature\n");
+        if (r) BN_free(r);
+        if (s) BN_free(s);
+        return -1;
+    }
+    
+    // Create ECDSA_SIG structure
+    ECDSA_SIG *ec_sig = ECDSA_SIG_new();
+    if (!ec_sig) {
+        fprintf(stderr, "[crypto] Failed to create ECDSA_SIG\n");
+        BN_free(r);
+        BN_free(s);
+        return -1;
+    }
+    
+    // Set R and S in signature (ECDSA_SIG_set0 transfers ownership)
+    if (!ECDSA_SIG_set0(ec_sig, r, s)) {
+        fprintf(stderr, "[crypto] Failed to set R and S in ECDSA_SIG\n");
+        ECDSA_SIG_free(ec_sig);
+        BN_free(r);
+        BN_free(s);
+        return -1;
+    }
+    
+    // Convert ECDSA_SIG to DER format
+    uint8_t *der_sig = NULL;
+    int der_sig_len = i2d_ECDSA_SIG(ec_sig, &der_sig);
+    ECDSA_SIG_free(ec_sig);
+    
+    if (der_sig_len <= 0 || !der_sig) {
+        fprintf(stderr, "[crypto] Failed to convert signature to DER format\n");
+        return -1;
+    }
+    
+    // Create verification context
+    EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+    if (!mdctx) {
+        fprintf(stderr, "[crypto] Failed to create EVP_MD_CTX\n");
+        OPENSSL_free(der_sig);
+        return -1;
+    }
+    
+    // Initialize verification with SHA-256
+    if (EVP_DigestVerifyInit(mdctx, NULL, EVP_sha256(), NULL, public_key) <= 0) {
+        fprintf(stderr, "[crypto] EVP_DigestVerifyInit failed\n");
+        EVP_MD_CTX_free(mdctx);
+        OPENSSL_free(der_sig);
+        return -1;
+    }
+    
+    // Verify signature
+    int verify_result = EVP_DigestVerify(mdctx, der_sig, der_sig_len, data, data_len);
+    
+    EVP_MD_CTX_free(mdctx);
+    OPENSSL_free(der_sig);
+    
+    if (verify_result == 1) {
+        fprintf(stderr, "[crypto] Signature verified successfully\n");
+        return 0;  // Success
+    } else if (verify_result == 0) {
+        fprintf(stderr, "[crypto] Signature verification failed (invalid signature)\n");
+        return -1;  // Invalid signature
+    } else {
+        fprintf(stderr, "[crypto] Signature verification error\n");
+        return -1;  // Error
+    }
 }
 
 #ifdef ENABLE_PQC

@@ -35,6 +35,15 @@ int derive_session_keys_ecka(const uint8_t *euicc_otsk, uint32_t euicc_otsk_len,
                               const uint8_t *smdp_otpk, uint32_t smdp_otpk_len,
                               uint8_t *session_key_enc, uint8_t *session_key_mac);
 
+// Verify ECDSA signature in TR-03111 format (64 bytes: R || S)
+// signature: 64-byte TR-03111 format signature
+// data: data that was signed
+// public_key: EVP_PKEY containing the public key
+// Returns 0 on success (signature valid), -1 on error (signature invalid or error)
+int ecdsa_verify(const uint8_t *data, uint32_t data_len,
+                 const uint8_t *signature, uint32_t signature_len,
+                 EVP_PKEY *public_key);
+
 #ifdef ENABLE_PQC
 // Generate ML-KEM-768 keypair using liboqs
 // Allocates memory for pk and sk which must be freed by caller
