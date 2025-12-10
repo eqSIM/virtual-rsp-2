@@ -149,3 +149,4 @@ echo "  • Classical: RSA-2048 / ECDSA-P256 for compatibility"
 echo "  • PQC: ML-DSA-87 signatures for quantum resistance"
 echo "  • Trust: Valid if EITHER classical OR PQC signature verifies"
 echo
+

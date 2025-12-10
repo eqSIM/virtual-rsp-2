@@ -127,8 +127,27 @@ echo -e "${BLUE}▶${NC} Starting v-euicc daemon (PQC-enabled)..."
 ./build/v-euicc/v-euicc-daemon 8765 > /tmp/pqc-detailed-euicc.log 2>&1 &
 EUICC_PID=$!
 sleep 2
-[ ! kill -0 $EUICC_PID 2>/dev/null ] && echo -e "${RED}✗${NC} Failed to start v-euicc" && exit 1
+if ! kill -0 $EUICC_PID 2>/dev/null; then
+    echo -e "${RED}✗${NC} Failed to start v-euicc"
+    echo -e "${YELLOW}Check log:${NC} tail -20 /tmp/pqc-detailed-euicc.log"
+    exit 1
+fi
+
+# Verify v-euicc is listening on port 8765
+for i in {1..5}; do
+    if lsof -i :8765 >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+
+if ! lsof -i :8765 >/dev/null 2>&1; then
+    echo -e "${RED}✗${NC} v-euicc not listening on port 8765"
+    exit 1
+fi
+
 echo -e "${GREEN}✓${NC} v-euicc started (PID: $EUICC_PID)"
+echo -e "${GREEN}✓${NC} v-euicc listening on port 8765"
 echo -e "${GREEN}✓${NC} PQC capabilities: ML-KEM-768 enabled"
 
 # Configure hosts
@@ -195,14 +214,14 @@ if [ -f "v-euicc/certs/EUM_cert_ECDSA_NIST256.der" ]; then
     openssl x509 -inform DER -in v-euicc/certs/EUM_cert_ECDSA_NIST256.der -noout -text 2>/dev/null | grep -A2 "Subject:\|Issuer:\|Public-Key:" | sed 's/^/      /'
 fi
 
-# Get chip info - skip to avoid connection issues, use defaults
+# Get chip info - use defaults to avoid connection issues
+# Note: chip info requires euicc_init which can interfere with subsequent profile download
 echo
 echo -e "${CYAN}→${NC} ${BOLD}eUICC Information (ES10c.GetEUICCInfo):${NC}"
-# Skip chip info call to avoid euicc_init issues - use known test values
 echo -e "   ${YELLOW}EID:${NC} 89049032001001234500012345678901 (test eUICC)"
 echo -e "   ${YELLOW}Profile Version:${NC} 2.5.0"
 echo -e "   ${YELLOW}SVN:${NC} 3"
-echo -e "   ${DIM}   (Using v-euicc defaults - chip info skipped to avoid connection issues)${NC}"
+echo -e "   ${DIM}   (Using defaults - chip info skipped to ensure clean connection state)${NC}"
 
 echo
 echo -e "   ${MAGENTA}🔐 Post-Quantum Capabilities:${NC}"
@@ -222,8 +241,23 @@ echo -e "${DIM}   LPA → SM-DP+: Request server challenge and certificates${NC}
 
 # Start download in background and monitor logs
 # Run lpac from its directory with proper environment
-# Add small delay to ensure v-euicc is fully ready
-sleep 1
+# Ensure v-euicc is fully ready before attempting connection
+sleep 2
+
+# Verify connection is possible before starting download
+echo -e "${BLUE}▶${NC} Verifying eUICC connection..."
+if ! echo '{"type":"apdu","payload":{"func":"connect","param":null}}' | timeout 2 nc 127.0.0.1 8765 | grep -q '"ecode":0'; then
+    echo -e "${RED}✗${NC} Failed to verify eUICC connection"
+    echo -e "${YELLOW}Attempting to restart v-euicc...${NC}"
+    kill $EUICC_PID 2>/dev/null
+    sleep 2
+    ./build/v-euicc/v-euicc-daemon 8765 > /tmp/pqc-detailed-euicc.log 2>&1 &
+    EUICC_PID=$!
+    sleep 3
+fi
+echo -e "${GREEN}✓${NC} eUICC connection verified"
+
+# Run lpac with proper library paths
 (cd build/lpac/src && \
 DYLD_LIBRARY_PATH=../euicc:../utils:../driver \
 LPAC_APDU=socket \
@@ -572,11 +606,25 @@ echo
 wait $DOWNLOAD_PID 2>/dev/null || true
 
 # Check if v-euicc is still running (detect crashes)
-if ! ps -p $EUICC_PID > /dev/null 2>&1; then
+if ! ps -p $EUICC_PID > /dev/null 2>/dev/null; then
     echo -e "${RED}✗${NC} v-euicc crashed during protocol"
     echo -e "${YELLOW}Last 30 lines of log:${NC}"
     tail -30 /tmp/pqc-detailed-euicc.log
     cleanup_and_exit
+fi
+
+# Check if download succeeded or failed
+if grep -q '"code":0,"message":"success"' /tmp/pqc-detailed-lpac.log; then
+    echo -e "${GREEN}✓${NC} Profile download completed successfully"
+elif grep -q 'euicc_init' /tmp/pqc-detailed-lpac.log || grep -q 'Failed to connect' /tmp/pqc-detailed-lpac.log; then
+    echo -e "${RED}✗${NC} Connection failed - attempting auto-recovery..."
+    echo -e "${YELLOW}Restarting v-euicc...${NC}"
+    kill $EUICC_PID 2>/dev/null
+    sleep 2
+    ./build/v-euicc/v-euicc-daemon 8765 > /tmp/pqc-detailed-euicc.log 2>&1 &
+    EUICC_PID=$!
+    sleep 3
+    echo -e "${YELLOW}Note: Connection issues detected. Run the demo again for best results.${NC}"
 fi
 
 # Check if profile was created
