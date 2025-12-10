@@ -45,6 +45,10 @@ int ecdsa_verify(const uint8_t *data, uint32_t data_len,
                  EVP_PKEY *public_key);
 
 #ifdef ENABLE_PQC
+// ============================================================================
+// ML-KEM (Key Encapsulation Mechanism) for Hybrid Key Exchange
+// ============================================================================
+
 // Generate ML-KEM-768 keypair using liboqs
 // Allocates memory for pk and sk which must be freed by caller
 // Returns 0 on success, -1 on error
@@ -64,6 +68,49 @@ int mlkem_decapsulate(const uint8_t *ciphertext, uint32_t ct_len,
 int derive_session_keys_hybrid(const uint8_t *Z_ec, uint32_t z_ec_len,
                                const uint8_t *Z_kem, uint32_t z_kem_len,
                                uint8_t *kek_out, uint8_t *km_out);
+
+// ============================================================================
+// ML-DSA (Digital Signature Algorithm) for Post-Quantum Authentication
+// Replaces GSMA PKI and trust hierarchy with PQC self-signed certificates
+// ============================================================================
+
+// Generate ML-DSA-87 keypair (NIST security level 5, ~256-bit)
+// Allocates memory for pk and sk which must be freed by caller
+// pk_len will be ~4864 bytes, sk_len will be ~2560 bytes
+// Returns 0 on success, -1 on error
+int generate_mldsa_keypair(uint8_t **pk, uint32_t *pk_len,
+                           uint8_t **sk, uint32_t *sk_len);
+
+// Sign data using ML-DSA-87
+// Allocates memory for signature which must be freed by caller
+// signature_len will be ~4627 bytes
+// Returns 0 on success, -1 on error
+int mldsa_sign(const uint8_t *data, uint32_t data_len,
+              const uint8_t *secret_key, uint32_t sk_len,
+              uint8_t **signature, uint32_t *signature_len);
+
+// Verify ML-DSA-87 signature
+// Returns 0 on success (valid signature), -1 on error/invalid
+int mldsa_verify(const uint8_t *data, uint32_t data_len,
+                const uint8_t *signature, uint32_t signature_len,
+                const uint8_t *public_key, uint32_t pk_len);
+
+// Generate hybrid certificate with both ECDSA and ML-DSA signatures
+// Creates a self-signed certificate structure with dual signatures
+// Returns 0 on success, -1 on error
+int generate_hybrid_certificate(const uint8_t *subject_data, uint32_t subject_len,
+                                EVP_PKEY *ecdsa_key,
+                                const uint8_t *mldsa_pk, uint32_t mldsa_pk_len,
+                                const uint8_t *mldsa_sk, uint32_t mldsa_sk_len,
+                                uint8_t **cert_out, uint32_t *cert_len);
+
+// Verify hybrid certificate with dual signature verification
+// Verifies both ECDSA and ML-DSA signatures
+// Returns 0 if EITHER signature is valid (quantum-safe security)
+int verify_hybrid_certificate(const uint8_t *cert_data, uint32_t cert_len,
+                              EVP_PKEY *ecdsa_pubkey,
+                              const uint8_t *mldsa_pk, uint32_t mldsa_pk_len);
+
 #endif // ENABLE_PQC
 
 

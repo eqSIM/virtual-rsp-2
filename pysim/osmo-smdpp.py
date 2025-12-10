@@ -475,13 +475,23 @@ class SmDppHttpServer:
             # Parse tag (supports single-byte and two-byte tags)
             if i >= len(data):
                 break
+            
+            # Read first byte
             t = data[i]
             i += 1
+            
+            # Check if this is a two-byte tag
+            # BER-TLV: If lower 5 bits are all 1s (0x1F), it's a multi-byte tag
             if (t & 0x1F) == 0x1F:  # Two-byte tag
                 if i >= len(data):
                     break
+                # Combine with next byte
                 t = (t << 8) | data[i]
                 i += 1
+                # Check if it's a three-byte tag (next byte also has 0x1F in lower bits)
+                if (data[i-1] & 0x1F) == 0x1F and i < len(data):
+                    t = (t << 8) | data[i]
+                    i += 1
             
             # Parse length
             if i >= len(data):
@@ -490,22 +500,31 @@ class SmDppHttpServer:
             i += 1
             if length & 0x80:  # Long form
                 num_bytes = length & 0x7F
-                if i + num_bytes > len(data):
+                if num_bytes == 0 or i + num_bytes > len(data):
                     break
                 length = 0
                 for _ in range(num_bytes):
                     length = (length << 8) | data[i]
                     i += 1
             
+            # Debug: Log tag being checked
+            if tag == 0x5F4A:
+                logger.debug(f"[PQC-DEBUG] Checking tag 0x{t:04X} (looking for 0x{tag:04X})")
+            
             # Check if this is the tag we're looking for
             if t == tag:
                 if i + length > len(data):
+                    logger.debug(f"[PQC-DEBUG] Tag 0x{tag:04X} found but length exceeds data")
                     return None
+                logger.debug(f"[PQC-DEBUG] Tag 0x{tag:04X} found! Length: {length} bytes")
                 return data[i:i+length]
             
             # Skip value
+            if i + length > len(data):
+                break
             i += length
         
+        logger.debug(f"[PQC-DEBUG] Tag 0x{tag:04X} not found in {len(data)} bytes of data")
         return None
 
     @staticmethod
@@ -799,9 +818,17 @@ class SmDppHttpServer:
             else:  # Short form
                 i += 1
             logger.debug(f"[PQC-DEBUG] Skipping SEQUENCE wrapper, searching from byte {i}...")
+            logger.debug(f"[PQC-DEBUG] Searching in {len(euiccSigned2_bin[i:])} bytes for tag 0x5F4A")
+            logger.debug(f"[PQC-DEBUG] First 50 bytes of content: {b2h(euiccSigned2_bin[i:i+50])}")
             euicc_pk_kem = self._extract_tlv(euiccSigned2_bin[i:], 0x5F4A)
+        else:
+            logger.warning(f"[PQC-DEBUG] euiccSigned2_bin doesn't start with SEQUENCE (0x30), got 0x{euiccSigned2_bin[0]:02X}")
+            # Try searching directly without skipping SEQUENCE
+            euicc_pk_kem = self._extract_tlv(euiccSigned2_bin, 0x5F4A)
         
         logger.debug(f"[PQC-DEBUG] _extract_tlv(0x5F4A) returned: {len(euicc_pk_kem) if euicc_pk_kem else 'None'}")
+        if euicc_pk_kem:
+            logger.debug(f"[PQC-DEBUG] ML-KEM key first 32 bytes: {b2h(euicc_pk_kem[:32])}")
         if euicc_pk_kem:
             logger.info(f"[PQC] eUICC ML-KEM-768 public key detected ({len(euicc_pk_kem)} bytes), enabling hybrid mode")
             logger.info(f"[PQC-DEMO] getBoundProfilePackage: eUICC ML-KEM public key detected")

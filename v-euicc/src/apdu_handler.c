@@ -223,8 +223,22 @@ int apdu_handle_logic_channel_open(struct euicc_state *state, const uint8_t *aid
     const uint8_t expected_aid[] = {0xA0, 0x00, 0x00, 0x05, 0x59, 0x10, 0x10, 0xFF,
                                     0xFF, 0xFF, 0xFF, 0x89, 0x00, 0x00, 0x01, 0x00};
 
+    fprintf(stderr, "[v-euicc] logic_channel_open called, aid_len=%u\n", aid_len);
+    if (aid) {
+        fprintf(stderr, "[v-euicc] Received AID: ");
+        for (uint32_t i = 0; i < aid_len && i < 32; i++) {
+            fprintf(stderr, "%02X ", aid[i]);
+        }
+        fprintf(stderr, "\n");
+    }
+
     if (aid_len != sizeof(expected_aid) || memcmp(aid, expected_aid, aid_len) != 0) {
-        fprintf(stderr, "Invalid AID received\n");
+        fprintf(stderr, "[v-euicc] Invalid AID received (len=%u, expected=%zu)\n", aid_len, sizeof(expected_aid));
+        fprintf(stderr, "[v-euicc] Expected AID: ");
+        for (size_t i = 0; i < sizeof(expected_aid); i++) {
+            fprintf(stderr, "%02X ", expected_aid[i]);
+        }
+        fprintf(stderr, "\n");
         return -1;
     }
 
@@ -233,6 +247,7 @@ int apdu_handle_logic_channel_open(struct euicc_state *state, const uint8_t *aid
     memcpy(state->aid, aid, aid_len);
     state->aid_len = aid_len;
 
+    fprintf(stderr, "[v-euicc] logic_channel_open success, returning channel %d\n", state->logic_channel);
     return state->logic_channel;
 }
 
@@ -1181,11 +1196,18 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
         
 #ifdef ENABLE_PQC
         // Generate ML-KEM-768 keypair if PQC is supported
+        fprintf(stderr, "[PQC-DEBUG] PrepareDownload: Checking PQC capabilities...\n");
+        fprintf(stderr, "[PQC-DEBUG]   mlkem768_supported: %s\n", state->pqc_caps.mlkem768_supported ? "true" : "false");
+        fprintf(stderr, "[PQC-DEBUG]   ENABLE_PQC defined: yes\n");
+        
         if (state->pqc_caps.mlkem768_supported) {
             fprintf(stderr, "[v-euicc] Generating ML-KEM-768 keypair for hybrid mode...\n");
             
-            if (generate_mlkem_keypair(&state->euicc_pk_kem, &state->euicc_pk_kem_len,
-                                      &state->euicc_sk_kem, &state->euicc_sk_kem_len) == 0) {
+            int gen_result = generate_mlkem_keypair(&state->euicc_pk_kem, &state->euicc_pk_kem_len,
+                                                    &state->euicc_sk_kem, &state->euicc_sk_kem_len);
+            fprintf(stderr, "[PQC-DEBUG] generate_mlkem_keypair returned: %d\n", gen_result);
+            
+            if (gen_result == 0) {
                 state->pqc_caps.hybrid_mode_active = true;
                 fprintf(stderr, "[v-euicc] ML-KEM-768 keypair generated: pk=%u bytes, sk=%u bytes\n",
                        state->euicc_pk_kem_len, state->euicc_sk_kem_len);
@@ -1218,10 +1240,15 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
                     fprintf(stderr, "[v-euicc] ERROR: Failed to build ML-KEM TLV!\n");
                 }
             } else {
-                fprintf(stderr, "[v-euicc] Warning: ML-KEM keypair generation failed, falling back to classical mode\n");
+                fprintf(stderr, "[v-euicc] ERROR: ML-KEM keypair generation failed (return code: %d), falling back to classical mode\n", gen_result);
+                fprintf(stderr, "[PQC-DEBUG] This means PQC will NOT be used - classical ECDH only\n");
                 state->pqc_caps.hybrid_mode_active = false;
             }
+        } else {
+            fprintf(stderr, "[PQC-DEBUG] ML-KEM not supported (mlkem768_supported=false), skipping PQC\n");
         }
+#else
+        fprintf(stderr, "[PQC-DEBUG] ENABLE_PQC not defined at compile time, PQC disabled\n");
 #endif
         
         // Wrap in SEQUENCE (tag 0x30)

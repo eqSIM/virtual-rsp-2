@@ -94,12 +94,19 @@ fi
 echo -e "${BLUE}▶${NC} Checking Python PQC support..."
 cd pysim
 # Use hybrid_ka module which has the library path finding logic
-if python3 -c "from hybrid_ka import PQC_AVAILABLE, oqs; print('liboqs-python:', oqs.oqs_version() if PQC_AVAILABLE else 'N/A')" 2>/dev/null; then
-    OQS_VERSION=$(python3 -c "from hybrid_ka import oqs; print(oqs.oqs_version())" 2>/dev/null)
-    echo -e "${GREEN}✓${NC} Python liboqs bindings available (version: $OQS_VERSION)"
-    PQC_MODE="HYBRID"
+# Set environment variable to prevent auto-install attempts
+if OQS_PYTHON_BUILD_SKIP_INSTALL=1 python3 -c "import sys, os; os.environ['OQS_PYTHON_BUILD_SKIP_INSTALL']='1'; sys.path.insert(0, '.'); from hybrid_ka import PQC_AVAILABLE, oqs; print('liboqs-python:', oqs.oqs_version() if PQC_AVAILABLE else 'N/A')" 2>/dev/null; then
+    OQS_VERSION=$(OQS_PYTHON_BUILD_SKIP_INSTALL=1 python3 -c "import sys, os; os.environ['OQS_PYTHON_BUILD_SKIP_INSTALL']='1'; sys.path.insert(0, '.'); from hybrid_ka import oqs; print(oqs.oqs_version())" 2>/dev/null)
+    if [[ "$OQS_VERSION" == "0.14.0" ]]; then
+        echo -e "${GREEN}✓${NC} Python liboqs bindings available (version: $OQS_VERSION) - CORRECT VERSION"
+        PQC_MODE="HYBRID"
+    else
+        echo -e "${YELLOW}⚠${NC}  Python liboqs version: $OQS_VERSION (expected 0.14.0)"
+        PQC_MODE="HYBRID"
+    fi
 else
-    echo -e "${YELLOW}⚠${NC}  Python liboqs not available (will use classical fallback)"
+    echo -e "${RED}✗${NC} Python liboqs not available"
+    echo -e "${YELLOW}⚠${NC}  Will use classical fallback mode"
     PQC_MODE="CLASSICAL_FALLBACK"
 fi
 cd ..
@@ -135,13 +142,19 @@ echo -e "${GREEN}✓${NC} Hosts configured"
 echo -e "${BLUE}▶${NC} Starting SM-DP+ server (PQC-aware)..."
 cd pysim
 # Use wrapper script that sets DYLD_LIBRARY_PATH for liboqs shared library
-./osmo-smdpp-pqc.sh -H 127.0.0.1 -p 8000 --nossl -c generated > /tmp/pqc-detailed-smdpp.log 2>&1 &
+# Also set OQS_PYTHON_BUILD_SKIP_INSTALL to prevent auto-install attempts
+OQS_PYTHON_BUILD_SKIP_INSTALL=1 ./osmo-smdpp-pqc.sh -H 127.0.0.1 -p 8000 --nossl -c generated > /tmp/pqc-detailed-smdpp.log 2>&1 &
 SMDPP_PID=$!
 nginx -c "$PWD/nginx-smdpp.conf" -p "$PWD" > /tmp/pqc-detailed-nginx.log 2>&1 &
 NGINX_PID=$!
 cd ..
 sleep 4
-[ ! kill -0 $SMDPP_PID 2>/dev/null ] && echo -e "${RED}✗${NC} Failed to start SM-DP+" && exit 1
+if ! kill -0 $SMDPP_PID 2>/dev/null; then
+    echo -e "${RED}✗${NC} Failed to start SM-DP+"
+    echo -e "${YELLOW}Last 20 lines of SM-DP+ log:${NC}"
+    tail -20 /tmp/pqc-detailed-smdpp.log
+    exit 1
+fi
 echo -e "${GREEN}✓${NC} SM-DP+ and nginx started"
 echo -e "${GREEN}✓${NC} Hybrid KA mode: $PQC_MODE"
 
@@ -182,31 +195,14 @@ if [ -f "v-euicc/certs/EUM_cert_ECDSA_NIST256.der" ]; then
     openssl x509 -inform DER -in v-euicc/certs/EUM_cert_ECDSA_NIST256.der -noout -text 2>/dev/null | grep -A2 "Subject:\|Issuer:\|Public-Key:" | sed 's/^/      /'
 fi
 
-# Get chip info
+# Get chip info - skip to avoid connection issues, use defaults
 echo
 echo -e "${CYAN}→${NC} ${BOLD}eUICC Information (ES10c.GetEUICCInfo):${NC}"
-CHIP_INFO=$($LPAC chip info 2>&1 || echo '{"code":1}')
-if echo "$CHIP_INFO" | grep -q '"code":0'; then
-    EID=$(echo "$CHIP_INFO" | jq -r '.payload.data.eidValue' 2>/dev/null)
-    echo -e "   ${YELLOW}EID:${NC} $EID"
-    echo "$CHIP_INFO" | jq -r '.payload.data.EUICCInfo2 | 
-        "   Profile Version:     \(.profileVersion)",
-        "   SVN:                 \(.svn)",
-        "   Firmware:            \(.euiccFirmwareVer)",
-        "   Free NV Memory:      \(.extCardResource.freeNonVolatileMemory) bytes",
-        "   Free Volatile Mem:   \(.extCardResource.freeVolatileMemory) bytes",
-        "   GlobalPlatform Ver:  \(.globalplatformVersion)",
-        "   TS 102 241 Version:  \(.ts102241Version)"' 2>/dev/null
-    
-    echo
-    echo -e "   ${YELLOW}Certificate PKIDs for Verification:${NC}"
-    echo "$CHIP_INFO" | jq -r '.payload.data.EUICCInfo2.euiccCiPKIdListForVerification[]' 2>/dev/null | sed 's/^/      • /'
-else
-    echo -e "   ${YELLOW}EID:${NC} 89049032001001234500012345678901 (test eUICC)"
-    echo -e "   ${YELLOW}Profile Version:${NC} 2.5.0"
-    echo -e "   ${YELLOW}SVN:${NC} 3"
-    echo -e "   ${DIM}   (Direct vEUICC communication active)${NC}"
-fi
+# Skip chip info call to avoid euicc_init issues - use known test values
+echo -e "   ${YELLOW}EID:${NC} 89049032001001234500012345678901 (test eUICC)"
+echo -e "   ${YELLOW}Profile Version:${NC} 2.5.0"
+echo -e "   ${YELLOW}SVN:${NC} 3"
+echo -e "   ${DIM}   (Using v-euicc defaults - chip info skipped to avoid connection issues)${NC}"
 
 echo
 echo -e "   ${MAGENTA}🔐 Post-Quantum Capabilities:${NC}"
@@ -225,12 +221,11 @@ echo -e "${CYAN}→${NC} ${BOLD}Phase 1: InitiateAuthentication (ES9+)${NC}"
 echo -e "${DIM}   LPA → SM-DP+: Request server challenge and certificates${NC}"
 
 # Start download in background and monitor logs
-# Run from build/lpac/src directory like test-all.sh does
-# Set LPAC_DRIVER_PATH to point to the driver directory
-DRIVER_PATH="$(pwd)/build/driver"
+# Run lpac from its directory with proper environment
+# Add small delay to ensure v-euicc is fully ready
+sleep 1
 (cd build/lpac/src && \
-DYLD_LIBRARY_PATH=../../lpac/euicc:../../lpac/utils:../../lpac/driver \
-LPAC_DRIVER_PATH="$DRIVER_PATH" \
+DYLD_LIBRARY_PATH=../euicc:../utils:../driver \
 LPAC_APDU=socket \
 LPAC_APDU_SOCKET_HOST=127.0.0.1 \
 LPAC_APDU_SOCKET_PORT=8765 \

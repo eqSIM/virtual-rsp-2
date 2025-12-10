@@ -131,12 +131,14 @@ static int send_line(int sockfd, const char *line) {
     while (total_sent < len) {
         int sent = send(sockfd, line + total_sent, len - total_sent, 0);
         if (sent <= 0) {
+            fprintf(stderr, "[v-euicc] send() failed: %s\n", strerror(errno));
             return -1;
         }
         total_sent += sent;
     }
 
     if (send(sockfd, "\n", 1, 0) <= 0) {
+        fprintf(stderr, "[v-euicc] send() newline failed: %s\n", strerror(errno));
         return -1;
     }
 
@@ -149,6 +151,8 @@ static void handle_client(int client_fd) {
     size_t recv_buffer_len = 0;
 
     printf("Client connected\n");
+    fflush(stdout);
+    fprintf(stderr, "[v-euicc] Client connected, fd=%d\n", client_fd);
 
     while (keep_running) {
         char *request_line = NULL;
@@ -166,20 +170,27 @@ static void handle_client(int client_fd) {
         }
 
         // Parse request
+        fprintf(stderr, "[v-euicc] Received request: %s\n", request_line);
         if (protocol_parse_request(request_line, &func, &param, &param_len) < 0) {
+            fprintf(stderr, "[v-euicc] Failed to parse request\n");
             free(request_line);
             break;
         }
 
+        fprintf(stderr, "[v-euicc] Parsed function: %s, param_len=%u\n", func, param_len);
         free(request_line);
 
         // Handle request
         if (strcmp(func, "connect") == 0) {
+            fprintf(stderr, "[v-euicc] Handling connect request\n");
             ecode = apdu_handle_connect(&state);
+            fprintf(stderr, "[v-euicc] connect returned ecode=%d\n", ecode);
         } else if (strcmp(func, "disconnect") == 0) {
             ecode = apdu_handle_disconnect(&state);
         } else if (strcmp(func, "logic_channel_open") == 0) {
+            fprintf(stderr, "[v-euicc] Handling logic_channel_open request\n");
             ecode = apdu_handle_logic_channel_open(&state, param, param_len);
+            fprintf(stderr, "[v-euicc] logic_channel_open returned ecode=%d\n", ecode);
         } else if (strcmp(func, "logic_channel_close") == 0) {
             if (param_len > 0) {
                 ecode = apdu_handle_logic_channel_close(&state, param[0]);
@@ -198,15 +209,23 @@ static void handle_client(int client_fd) {
         free(response_data);
 
         if (!response_json) {
+            fprintf(stderr, "[v-euicc] Failed to generate response JSON\n");
             break;
         }
 
+        fprintf(stderr, "[v-euicc] Sending response: %s\n", response_json);
         if (send_line(client_fd, response_json) < 0) {
+            fprintf(stderr, "[v-euicc] Failed to send response\n");
             free(response_json);
             break;
         }
+        
+        // Flush to ensure data is sent immediately
+        fflush(stdout);
+        fflush(stderr);
 
         free(response_json);
+        fprintf(stderr, "[v-euicc] Response sent successfully\n");
 
         // If disconnect, close connection
         if (func && strcmp(func, "disconnect") == 0) {
@@ -247,19 +266,23 @@ int main(int argc, char **argv) {
     }
 
     printf("Virtual eUICC daemon listening on port %s\n", port);
+    fflush(stdout);
+    fprintf(stderr, "[v-euicc] Server socket created, waiting for connections...\n");
 
     while (keep_running) {
         addr_size = sizeof(client_addr);
+        fprintf(stderr, "[v-euicc] Waiting for accept()...\n");
         client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &addr_size);
 
         if (client_fd < 0) {
             if (errno == EINTR) {
                 continue;
             }
-            fprintf(stderr, "accept failed\n");
+            fprintf(stderr, "[v-euicc] accept failed: %s\n", strerror(errno));
             break;
         }
 
+        fprintf(stderr, "[v-euicc] Connection accepted, client_fd=%d\n", client_fd);
         handle_client(client_fd);
 
 #ifdef _WIN32

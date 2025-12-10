@@ -303,25 +303,31 @@ static int apdu_interface_connect(struct euicc_ctx *ctx) {
     const char *port = getenv_or_default(ENV_SOCKET_PORT, "8765");
 
     if (socket_init() != 0) {
-        fprintf(stderr, "Socket initialization failed\n");
+        fprintf(stderr, "[lpac-socket] Socket initialization failed\n");
         return -1;
     }
 
     userdata->sockfd = socket_connect_to_server(host, port);
     if (userdata->sockfd < 0) {
+        fprintf(stderr, "[lpac-socket] Failed to connect to server\n");
         return -1;
     }
 
     userdata->read_buffer_len = 0;
 
+    fprintf(stderr, "[lpac-socket] Sending connect request\n");
     if (json_request(userdata, "connect", NULL, 0)) {
+        fprintf(stderr, "[lpac-socket] Failed to send connect request\n");
         return -1;
     }
 
+    fprintf(stderr, "[lpac-socket] Waiting for connect response\n");
     if (json_response(userdata, &ecode, NULL, NULL)) {
+        fprintf(stderr, "[lpac-socket] Failed to read connect response\n");
         return -1;
     }
 
+    fprintf(stderr, "[lpac-socket] connect() returning ecode=%d\n", ecode);
     return ecode;
 }
 
@@ -348,14 +354,19 @@ static int apdu_interface_logic_channel_open(struct euicc_ctx *ctx, const uint8_
     struct socket_userdata *userdata = ctx->apdu.interface->userdata;
     int ecode;
 
+    fprintf(stderr, "[lpac-socket] Sending logic_channel_open request\n");
     if (json_request(userdata, "logic_channel_open", aid, aid_len)) {
+        fprintf(stderr, "[lpac-socket] Failed to send logic_channel_open request\n");
         return -1;
     }
 
+    fprintf(stderr, "[lpac-socket] Waiting for logic_channel_open response\n");
     if (json_response(userdata, &ecode, NULL, NULL)) {
+        fprintf(stderr, "[lpac-socket] Failed to read logic_channel_open response\n");
         return -1;
     }
 
+    fprintf(stderr, "[lpac-socket] logic_channel_open() returning ecode=%d\n", ecode);
     return ecode;
 }
 
