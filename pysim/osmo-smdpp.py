@@ -490,8 +490,8 @@ class SmDppHttpServer:
                 i += 1
                 # Check if it's a three-byte tag (next byte also has 0x1F in lower bits)
                 if (data[i-1] & 0x1F) == 0x1F and i < len(data):
-                    t = (t << 8) | data[i]
-                    i += 1
+                t = (t << 8) | data[i]
+                i += 1
             
             # Parse length
             if i >= len(data):

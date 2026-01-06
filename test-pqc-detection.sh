@@ -50,3 +50,4 @@ grep -E "PQC-DEBUG|ML-KEM|5F4A|hybrid|classical" /tmp/pqc-test-smdpp.log | head 
 # Cleanup
 kill $EUICC_PID $SMDPP_PID 2>/dev/null || true
 
+

@@ -102,7 +102,7 @@ if OQS_PYTHON_BUILD_SKIP_INSTALL=1 python3 -c "import sys, os; os.environ['OQS_P
         PQC_MODE="HYBRID"
     else
         echo -e "${YELLOW}⚠${NC}  Python liboqs version: $OQS_VERSION (expected 0.14.0)"
-        PQC_MODE="HYBRID"
+    PQC_MODE="HYBRID"
     fi
 else
     echo -e "${RED}✗${NC} Python liboqs not available"
@@ -218,9 +218,9 @@ fi
 # Note: chip info requires euicc_init which can interfere with subsequent profile download
 echo
 echo -e "${CYAN}→${NC} ${BOLD}eUICC Information (ES10c.GetEUICCInfo):${NC}"
-echo -e "   ${YELLOW}EID:${NC} 89049032001001234500012345678901 (test eUICC)"
-echo -e "   ${YELLOW}Profile Version:${NC} 2.5.0"
-echo -e "   ${YELLOW}SVN:${NC} 3"
+    echo -e "   ${YELLOW}EID:${NC} 89049032001001234500012345678901 (test eUICC)"
+    echo -e "   ${YELLOW}Profile Version:${NC} 2.5.0"
+    echo -e "   ${YELLOW}SVN:${NC} 3"
 echo -e "   ${DIM}   (Using defaults - chip info skipped to ensure clean connection state)${NC}"
 
 echo
