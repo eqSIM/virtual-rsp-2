@@ -1,0 +1,24 @@
+{
+  "eid": "89049032001001234500012345678901",
+  "profiles": [
+    {
+      "iccid": "8949449999999990049",
+      "isdp_aid": "",
+      "state": "disabled",
+      "profile_name": "TS48V4-SAIP2-1B-NOBERTLV-UNIQUE",
+      "service_provider": "OsmocomSPN",
+      "matching_id": "TS48V4-SAIP2-1B-NOBERTLV-UNIQUE",
+      "installed_at": "2026-01-12T04:49:02.526250Z"
+    },
+    {
+      "iccid": "8949449999999990049",
+      "isdp_aid": "",
+      "state": "disabled",
+      "profile_name": "TS48V2-SAIP2-3-BERTLV-UNIQUE",
+      "service_provider": "OsmocomSPN",
+      "matching_id": "TS48V2-SAIP2-3-BERTLV-UNIQUE",
+      "installed_at": "2026-01-12T04:49:31.159228Z"
+    }
+  ],
+  "last_modified": "2026-01-12T04:53:13.462634Z"
+}

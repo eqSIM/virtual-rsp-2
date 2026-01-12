@@ -2075,6 +2075,415 @@ static int process_es10x_command(struct euicc_state *state, uint8_t **response, 
         break;
     }
 
+    case 0xBF31: // EnableProfile (ES10c)
+    {
+        fprintf(stderr, "[v-euicc] EnableProfile (BF31) received, len=%u\n", command_len);
+        
+        // Parse request: BF31 LEN { refreshFlag (81 optional), iccid (5A) OR isdpAid (4F) }
+        // Skip the 2-byte tag (BF 31)
+        const uint8_t *data_ptr = command + 2;
+        uint32_t remaining = command_len - 2;
+        
+        // Skip length byte(s)
+        if (remaining > 0) {
+            uint8_t len_byte = data_ptr[0];
+            if (len_byte < 0x80) {
+                // Short form: 1 byte length
+                data_ptr++;
+                remaining--;
+            } else if (len_byte == 0x81) {
+                // Long form: 0x81 + 1 byte length
+                data_ptr += 2;
+                remaining -= 2;
+            } else if (len_byte == 0x82) {
+                // Long form: 0x82 + 2 byte length
+                data_ptr += 3;
+                remaining -= 3;
+            }
+        }
+        
+        fprintf(stderr, "[v-euicc] EnableProfile: parsing %u bytes of content\n", remaining);
+        
+        char target_iccid[21] = {0};
+        char target_aid[33] = {0};
+        
+        // Parse TLVs in the content
+        while (remaining >= 2) {
+            uint16_t inner_tag = data_ptr[0];
+            uint32_t tag_len = 1;
+            
+            // Check for 2-byte tag
+            if ((inner_tag & 0x1F) == 0x1F && remaining >= 2) {
+                inner_tag = (inner_tag << 8) | data_ptr[1];
+                tag_len = 2;
+            }
+            
+            data_ptr += tag_len;
+            remaining -= tag_len;
+            
+            if (remaining < 1) break;
+            
+            // Get length
+            uint32_t inner_len = data_ptr[0];
+            uint32_t len_bytes = 1;
+            if (inner_len == 0x81 && remaining >= 2) {
+                inner_len = data_ptr[1];
+                len_bytes = 2;
+            } else if (inner_len == 0x82 && remaining >= 3) {
+                inner_len = (data_ptr[1] << 8) | data_ptr[2];
+                len_bytes = 3;
+            }
+            
+            data_ptr += len_bytes;
+            remaining -= len_bytes;
+            
+            if (inner_len > remaining) break;
+            
+            fprintf(stderr, "[v-euicc] EnableProfile: found tag %04X len %u\n", inner_tag, inner_len);
+            
+            if (inner_tag == 0x5A && inner_len <= 10) {
+                // ICCID (BCD format) - swap nibbles as per ETSI
+                for (uint32_t i = 0; i < inner_len && i < 10; i++) {
+                    uint8_t high = (data_ptr[i] >> 4) & 0x0F;
+                    uint8_t low = data_ptr[i] & 0x0F;
+                    // BCD: low nibble first, high nibble second
+                    if (low != 0x0F) target_iccid[i*2] = '0' + low;
+                    if (high != 0x0F) target_iccid[i*2+1] = '0' + high;
+                }
+                fprintf(stderr, "[v-euicc] EnableProfile: parsed ICCID=%s\n", target_iccid);
+            } else if (inner_tag == 0x4F && inner_len <= 16) {
+                // ISD-P AID (hex)
+                for (uint32_t i = 0; i < inner_len; i++) {
+                    snprintf(target_aid + i*2, 3, "%02X", data_ptr[i]);
+                }
+                fprintf(stderr, "[v-euicc] EnableProfile: parsed AID=%s\n", target_aid);
+            }
+            
+            data_ptr += inner_len;
+            remaining -= inner_len;
+        }
+        
+        fprintf(stderr, "[v-euicc] EnableProfile: ICCID=%s, AID=%s\n", target_iccid, target_aid);
+        
+        // Find profile to enable
+        struct profile_metadata *target = NULL;
+        struct profile_metadata *profile = state->profiles;
+        while (profile) {
+            if ((strlen(target_iccid) > 0 && strcmp(profile->iccid, target_iccid) == 0) ||
+                (strlen(target_aid) > 0 && strcmp(profile->isdp_aid, target_aid) == 0)) {
+                target = profile;
+                break;
+            }
+            profile = profile->next;
+        }
+        
+        uint8_t result_code = 0x00; // Success
+        
+        if (!target) {
+            fprintf(stderr, "[v-euicc] EnableProfile: Profile not found\n");
+            result_code = 0x01; // ICCID/AID not found
+        } else {
+            // Disable currently enabled profile (SGP.22: only one enabled at a time)
+            profile = state->profiles;
+            while (profile) {
+                if (profile->state == PROFILE_STATE_ENABLED && profile != target) {
+                    fprintf(stderr, "[v-euicc] Auto-disabling profile: %s\n", profile->iccid);
+                    profile->state = PROFILE_STATE_DISABLED;
+                }
+                profile = profile->next;
+            }
+            
+            // Enable target profile
+            target->state = PROFILE_STATE_ENABLED;
+            fprintf(stderr, "[v-euicc] Profile enabled: %s\n", target->iccid);
+        }
+        
+        // Build response: BF31 { enableResult (80) }
+        uint8_t enable_resp_buf[16];
+        uint8_t *enable_ptr = enable_resp_buf;
+        uint32_t enable_len = 0;
+        
+        // Add enableResult (tag 0x80)
+        enable_ptr[0] = 0x80;
+        enable_ptr[1] = 0x01;
+        enable_ptr[2] = result_code;
+        enable_len = 3;
+        
+        // Wrap in EnableProfileResponse (BF31)
+        build_tlv(&resp_body, &resp_body_len, 0xBF31, enable_resp_buf, enable_len);
+        
+        fprintf(stderr, "[v-euicc] EnableProfile response built, result=%02X\n", result_code);
+        break;
+    }
+
+    case 0xBF32: // DisableProfile (ES10c)
+    {
+        fprintf(stderr, "[v-euicc] DisableProfile (BF32) received, len=%u\n", command_len);
+        
+        // Parse request: BF32 LEN { refreshFlag (81 optional), iccid (5A) OR isdpAid (4F) }
+        // Skip the 2-byte tag (BF 32)
+        const uint8_t *data_ptr = command + 2;
+        uint32_t remaining = command_len - 2;
+        
+        // Skip length byte(s)
+        if (remaining > 0) {
+            uint8_t len_byte = data_ptr[0];
+            if (len_byte < 0x80) {
+                data_ptr++;
+                remaining--;
+            } else if (len_byte == 0x81) {
+                data_ptr += 2;
+                remaining -= 2;
+            } else if (len_byte == 0x82) {
+                data_ptr += 3;
+                remaining -= 3;
+            }
+        }
+        
+        fprintf(stderr, "[v-euicc] DisableProfile: parsing %u bytes of content\n", remaining);
+        
+        char target_iccid[21] = {0};
+        char target_aid[33] = {0};
+        
+        // Parse TLVs
+        while (remaining >= 2) {
+            uint16_t inner_tag = data_ptr[0];
+            uint32_t tag_len = 1;
+            
+            if ((inner_tag & 0x1F) == 0x1F && remaining >= 2) {
+                inner_tag = (inner_tag << 8) | data_ptr[1];
+                tag_len = 2;
+            }
+            
+            data_ptr += tag_len;
+            remaining -= tag_len;
+            
+            if (remaining < 1) break;
+            
+            uint32_t inner_len = data_ptr[0];
+            uint32_t len_bytes = 1;
+            if (inner_len == 0x81 && remaining >= 2) {
+                inner_len = data_ptr[1];
+                len_bytes = 2;
+            } else if (inner_len == 0x82 && remaining >= 3) {
+                inner_len = (data_ptr[1] << 8) | data_ptr[2];
+                len_bytes = 3;
+            }
+            
+            data_ptr += len_bytes;
+            remaining -= len_bytes;
+            
+            if (inner_len > remaining) break;
+            
+            fprintf(stderr, "[v-euicc] DisableProfile: found tag %04X len %u\n", inner_tag, inner_len);
+            
+            if (inner_tag == 0x5A && inner_len <= 10) {
+                // ICCID (BCD format) - swap nibbles
+                for (uint32_t i = 0; i < inner_len && i < 10; i++) {
+                    uint8_t high = (data_ptr[i] >> 4) & 0x0F;
+                    uint8_t low = data_ptr[i] & 0x0F;
+                    if (low != 0x0F) target_iccid[i*2] = '0' + low;
+                    if (high != 0x0F) target_iccid[i*2+1] = '0' + high;
+                }
+                fprintf(stderr, "[v-euicc] DisableProfile: parsed ICCID=%s\n", target_iccid);
+            } else if (inner_tag == 0x4F && inner_len <= 16) {
+                // ISD-P AID (hex)
+                for (uint32_t i = 0; i < inner_len; i++) {
+                    snprintf(target_aid + i*2, 3, "%02X", data_ptr[i]);
+                }
+                fprintf(stderr, "[v-euicc] DisableProfile: parsed AID=%s\n", target_aid);
+            }
+            
+            data_ptr += inner_len;
+            remaining -= inner_len;
+        }
+        
+        fprintf(stderr, "[v-euicc] DisableProfile: ICCID=%s, AID=%s\n", target_iccid, target_aid);
+        
+        // Find profile to disable
+        struct profile_metadata *target = NULL;
+        struct profile_metadata *profile = state->profiles;
+        while (profile) {
+            if ((strlen(target_iccid) > 0 && strcmp(profile->iccid, target_iccid) == 0) ||
+                (strlen(target_aid) > 0 && strcmp(profile->isdp_aid, target_aid) == 0)) {
+                target = profile;
+                break;
+            }
+            profile = profile->next;
+        }
+        
+        uint8_t result_code = 0x00; // Success
+        
+        if (!target) {
+            fprintf(stderr, "[v-euicc] DisableProfile: Profile not found\n");
+            result_code = 0x01; // ICCID/AID not found
+        } else if (target->state != PROFILE_STATE_ENABLED) {
+            fprintf(stderr, "[v-euicc] DisableProfile: Profile already disabled\n");
+            result_code = 0x02; // Profile not in correct state
+        } else {
+            // Disable profile
+            target->state = PROFILE_STATE_DISABLED;
+            fprintf(stderr, "[v-euicc] Profile disabled: %s\n", target->iccid);
+        }
+        
+        // Build response: BF32 { disableResult (80) }
+        uint8_t disable_resp_buf[16];
+        uint8_t *disable_ptr = disable_resp_buf;
+        uint32_t disable_len = 0;
+        
+        // Add disableResult (tag 0x80)
+        disable_ptr[0] = 0x80;
+        disable_ptr[1] = 0x01;
+        disable_ptr[2] = result_code;
+        disable_len = 3;
+        
+        // Wrap in DisableProfileResponse (BF32)
+        build_tlv(&resp_body, &resp_body_len, 0xBF32, disable_resp_buf, disable_len);
+        
+        fprintf(stderr, "[v-euicc] DisableProfile response built, result=%02X\n", result_code);
+        break;
+    }
+
+    case 0xBF33: // DeleteProfile (ES10c)
+    {
+        fprintf(stderr, "[v-euicc] DeleteProfile (BF33) received, len=%u\n", command_len);
+        
+        // Parse request: BF33 LEN { iccid (5A) OR isdpAid (4F) }
+        // Skip the 2-byte tag (BF 33)
+        const uint8_t *data_ptr = command + 2;
+        uint32_t remaining = command_len - 2;
+        
+        // Skip length byte(s)
+        if (remaining > 0) {
+            uint8_t len_byte = data_ptr[0];
+            if (len_byte < 0x80) {
+                data_ptr++;
+                remaining--;
+            } else if (len_byte == 0x81) {
+                data_ptr += 2;
+                remaining -= 2;
+            } else if (len_byte == 0x82) {
+                data_ptr += 3;
+                remaining -= 3;
+            }
+        }
+        
+        fprintf(stderr, "[v-euicc] DeleteProfile: parsing %u bytes of content\n", remaining);
+        
+        char target_iccid[21] = {0};
+        char target_aid[33] = {0};
+        
+        // Parse TLVs
+        while (remaining >= 2) {
+            uint16_t inner_tag = data_ptr[0];
+            uint32_t tag_len = 1;
+            
+            if ((inner_tag & 0x1F) == 0x1F && remaining >= 2) {
+                inner_tag = (inner_tag << 8) | data_ptr[1];
+                tag_len = 2;
+            }
+            
+            data_ptr += tag_len;
+            remaining -= tag_len;
+            
+            if (remaining < 1) break;
+            
+            uint32_t inner_len = data_ptr[0];
+            uint32_t len_bytes = 1;
+            if (inner_len == 0x81 && remaining >= 2) {
+                inner_len = data_ptr[1];
+                len_bytes = 2;
+            } else if (inner_len == 0x82 && remaining >= 3) {
+                inner_len = (data_ptr[1] << 8) | data_ptr[2];
+                len_bytes = 3;
+            }
+            
+            data_ptr += len_bytes;
+            remaining -= len_bytes;
+            
+            if (inner_len > remaining) break;
+            
+            fprintf(stderr, "[v-euicc] DeleteProfile: found tag %04X len %u\n", inner_tag, inner_len);
+            
+            if (inner_tag == 0x5A && inner_len <= 10) {
+                // ICCID (BCD format) - swap nibbles
+                for (uint32_t i = 0; i < inner_len && i < 10; i++) {
+                    uint8_t high = (data_ptr[i] >> 4) & 0x0F;
+                    uint8_t low = data_ptr[i] & 0x0F;
+                    if (low != 0x0F) target_iccid[i*2] = '0' + low;
+                    if (high != 0x0F) target_iccid[i*2+1] = '0' + high;
+                }
+                fprintf(stderr, "[v-euicc] DeleteProfile: parsed ICCID=%s\n", target_iccid);
+            } else if (inner_tag == 0x4F && inner_len <= 16) {
+                // ISD-P AID (hex)
+                for (uint32_t i = 0; i < inner_len; i++) {
+                    snprintf(target_aid + i*2, 3, "%02X", data_ptr[i]);
+                }
+                fprintf(stderr, "[v-euicc] DeleteProfile: parsed AID=%s\n", target_aid);
+            }
+            
+            data_ptr += inner_len;
+            remaining -= inner_len;
+        }
+        
+        fprintf(stderr, "[v-euicc] DeleteProfile: ICCID=%s, AID=%s\n", target_iccid, target_aid);
+        
+        // Find profile to delete
+        struct profile_metadata *target = NULL;
+        struct profile_metadata *prev = NULL;
+        struct profile_metadata *profile = state->profiles;
+        
+        while (profile) {
+            if ((strlen(target_iccid) > 0 && strcmp(profile->iccid, target_iccid) == 0) ||
+                (strlen(target_aid) > 0 && strcmp(profile->isdp_aid, target_aid) == 0)) {
+                target = profile;
+                break;
+            }
+            prev = profile;
+            profile = profile->next;
+        }
+        
+        uint8_t result_code = 0x00; // Success
+        
+        if (!target) {
+            fprintf(stderr, "[v-euicc] DeleteProfile: Profile not found\n");
+            result_code = 0x01; // ICCID/AID not found
+        } else if (target->state == PROFILE_STATE_ENABLED) {
+            fprintf(stderr, "[v-euicc] DeleteProfile: Cannot delete enabled profile\n");
+            result_code = 0x02; // Profile not in correct state (must be disabled first)
+        } else {
+            // Remove from linked list
+            if (prev) {
+                prev->next = target->next;
+            } else {
+                state->profiles = target->next;
+            }
+            
+            // Free memory
+            free(target->profile_data);
+            free(target);
+            
+            fprintf(stderr, "[v-euicc] Profile deleted: %s\n", target_iccid);
+        }
+        
+        // Build response: BF33 { deleteResult (80) }
+        uint8_t delete_resp_buf[16];
+        uint8_t *delete_ptr = delete_resp_buf;
+        uint32_t delete_len = 0;
+        
+        // Add deleteResult (tag 0x80)
+        delete_ptr[0] = 0x80;
+        delete_ptr[1] = 0x01;
+        delete_ptr[2] = result_code;
+        delete_len = 3;
+        
+        // Wrap in DeleteProfileResponse (BF33)
+        build_tlv(&resp_body, &resp_body_len, 0xBF33, delete_resp_buf, delete_len);
+        
+        fprintf(stderr, "[v-euicc] DeleteProfile response built, result=%02X\n", result_code);
+        break;
+    }
+
     case 0xBF2D: // GetProfilesInfo (ES10c)
     {
         fprintf(stderr, "[v-euicc] GetProfilesInfo (BF2D) received - building profile list\n");

@@ -1,0 +1,7 @@
+# Virtual RSP Control Center - Python Dependencies
+
+# PySide6 for GUI
+PySide6>=6.6.0
+
+# No other dependencies needed - uses stdlib for everything else
+
