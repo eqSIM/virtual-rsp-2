@@ -146,6 +146,54 @@ DATA_DIR = './smdpp-data'
 HOSTNAME = 'testsmdpplus1.example.com' # must match certificates!
 
 
+from datetime import datetime
+import shutil
+
+class DownloadHistoryStore:
+    """Store for RSP download history."""
+    def __init__(self, filepath: str):
+        self.filepath = Path(filepath)
+        self.history = []
+        self._load()
+
+    def _load(self):
+        if self.filepath.exists():
+            try:
+                with open(self.filepath, 'r') as f:
+                    self.history = json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load download history: {e}")
+
+    def _save(self):
+        try:
+            with open(self.filepath, 'w') as f:
+                json.dump(self.history, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save download history: {e}")
+
+    def record_download(self, transaction_id: str, eid: str, iccid: str, matching_id: str, status: str):
+        record = {
+            'transaction_id': transaction_id,
+            'eid': eid,
+            'iccid': iccid,
+            'matching_id': matching_id,
+            'status': status,
+            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'final_result': None
+        }
+        self.history.append(record)
+        self._save()
+
+    def update_download(self, transaction_id: str, status: str, final_result: str = None):
+        for record in self.history:
+            if record['transaction_id'] == transaction_id:
+                record['status'] = status
+                if final_result:
+                    record['final_result'] = final_result
+                self._save()
+                return
+        logger.warning(f"Could not find download record for transaction_id: {transaction_id}")
+
 def b64encode2str(req: bytes) -> str:
     """Encode given input bytes as base64 and return result as string."""
     return base64.b64encode(req).decode('ascii')
@@ -440,6 +488,10 @@ class SmDppHttpServer:
             db_path = os.path.join(DATA_DIR, f"sm-dp-sessions-{session_db_suffix}")
             self.rss = rsp.RspSessionStore(filename=db_path, in_memory=False)
             logger.info(f"Using file-based session storage: {db_path}")
+
+        # Initialize download history
+        history_path = os.path.join(DATA_DIR, "download_history.json")
+        self.download_history = DownloadHistoryStore(history_path)
 
     @app.handle_errors(ApiError)
     def handle_apierror(self, request: IRequest, failure):
@@ -754,6 +806,17 @@ class SmDppHttpServer:
             # HACK: Use empty PPP as we're still debugging the configureISDP step, and we want to avoid
             # cluttering the log with stuff happening after the failure
             #upp = UnprotectedProfilePackage.from_der(b'', metadata=ss.profileMetadata)
+        
+        # Record download attempt - extract ICCID from session's profileMetadata
+        iccid_for_log = swap_nibbles(b2h(ss.profileMetadata.iccid_bin)) if ss.profileMetadata else 'unknown'
+        self.download_history.record_download(
+            transaction_id=transactionId,
+            eid=ss.eid,
+            iccid=iccid_for_log,
+            matching_id=ss.matchingId,
+            status='bpp_sent'
+        )
+
         if False:
             # Use random keys
             bpp = BoundProfilePackage.from_upp(upp)
@@ -792,8 +855,15 @@ class SmDppHttpServer:
             pird_bin = rsp.asn1.encode('ProfileInstallationResultData', pird)
             # verify eUICC signature
             if not self._ecdsa_verify(ss.euicc_cert, profileInstallRes['euiccSignPIR'], pird_bin):
+                self.download_history.update_download(transactionId, 'failed', 'Signature verification failed')
                 raise Exception('ECDSA signature verification failed on notification')
+            
             logger.debug("Profile Installation Final Result: %s", pird['finalResult'])
+            
+            # Update download history
+            status = 'success' if pird['finalResult'] == 'success' else 'failed'
+            self.download_history.update_download(transactionId, status, pird['finalResult'])
+            
             # remove session state
             del self.rss[transactionId]
         elif pendingNotification[0] == 'otherSignedNotification':
@@ -872,6 +942,94 @@ class SmDppHttpServer:
         del self.rss[transactionId]
         return { 'transactionId': transactionId }
 
+    # --- MNO Management API Endpoints ---
+
+    @app.route('/mno/profiles', methods=['GET'])
+    def mno_list_profiles(self, request: IRequest):
+        """List all available UPP profiles with metadata"""
+        profiles = []
+        for filename in os.listdir(self.upp_dir):
+            if filename.endswith('.der'):
+                path = os.path.join(self.upp_dir, filename)
+                stat = os.stat(path)
+                profiles.append({
+                    'matching_id': filename[:-4],
+                    'size': stat.st_size,
+                    'modified': datetime.fromtimestamp(stat.st_mtime).isoformat() + 'Z'
+                })
+        request.setHeader('Content-Type', 'application/json')
+        return json.dumps(profiles)
+
+    @app.route('/mno/profiles', methods=['POST'])
+    def mno_upload_profile(self, request: IRequest):
+        """Upload new profile (.der file)"""
+        # Simplistic upload handling for demo purposes
+        # In a real app we'd use multipart/form-data
+        content = request.content.read()
+        filename = request.getHeader('X-Filename')
+        if not filename or not filename.endswith('.der'):
+            request.setResponseCode(400)
+            return b"Invalid filename"
+        
+        path = os.path.join(self.upp_dir, filename)
+        with open(path, 'wb') as f:
+            f.write(content)
+        
+        request.setResponseCode(201)
+        return b"Profile uploaded"
+
+    @app.route('/mno/profiles/<matching_id>', methods=['DELETE'])
+    def mno_delete_profile(self, request: IRequest, matching_id: str):
+        """Delete a profile"""
+        path = os.path.join(self.upp_dir, matching_id + '.der')
+        if os.path.exists(path):
+            os.remove(path)
+            return b"Profile deleted"
+        else:
+            request.setResponseCode(404)
+            return b"Profile not found"
+
+    @app.route('/mno/sessions', methods=['GET'])
+    def mno_list_sessions(self, request: IRequest):
+        """List active RSP sessions - only shows sessions with authenticated EIDs"""
+        sessions = []
+        for tid in list(self.rss.keys()):  # Use list() to avoid iteration issues
+            ss = self.rss.get(tid)
+            if ss is None:
+                continue
+            eid = getattr(ss, 'eid', None)
+            # Only show sessions that have progressed past initial authentication
+            sessions.append({
+                'transaction_id': tid,
+                'eid': eid if eid else 'Pending authentication...',
+                'matching_id': getattr(ss, 'matchingId', None) or 'Not yet selected',
+                'started_at': getattr(ss, 'created_at', datetime.utcnow().isoformat() + 'Z')
+            })
+        request.setHeader('Content-Type', 'application/json')
+        return json.dumps(sessions)
+
+    @app.route('/mno/downloads', methods=['GET'])
+    def mno_list_downloads(self, request: IRequest):
+        """Get download history"""
+        request.setHeader('Content-Type', 'application/json')
+        return json.dumps(self.download_history.history)
+
+    @app.route('/mno/stats', methods=['GET'])
+    def mno_get_stats(self, request: IRequest):
+        """Dashboard statistics"""
+        history = self.download_history.history
+        success_count = sum(1 for r in history if r['status'] == 'success')
+        failed_count = sum(1 for r in history if r['status'] == 'failed')
+        
+        stats = {
+            'total_profiles': len([f for f in os.listdir(self.upp_dir) if f.endswith('.der')]),
+            'active_sessions': len(self.rss.keys()),
+            'total_downloads': len(history),
+            'success_rate': (success_count / len(history) * 100) if history else 0,
+            'failed_count': failed_count
+        }
+        request.setHeader('Content-Type', 'application/json')
+        return json.dumps(stats)
 
 def main(argv):
     parser = argparse.ArgumentParser()
@@ -891,7 +1049,7 @@ def main(argv):
     logger.info("osmo-smdpp starting on %s:%s (SSL: %s)", args.host, args.port, "disabled" if args.nossl else "enabled")
 
     common_cert_path = os.path.join(DATA_DIR, args.certdir)
-    hs = SmDppHttpServer(server_hostname=HOSTNAME, ci_certs_path=os.path.join(common_cert_path, 'CertificateIssuer'), common_cert_path=common_cert_path, use_brainpool=args.brainpool)
+    hs = SmDppHttpServer(server_hostname=HOSTNAME, ci_certs_path=os.path.join(common_cert_path, 'CertificateIssuer'), common_cert_path=common_cert_path, use_brainpool=args.brainpool, in_memory=args.in_memory)
     if(args.nossl):
         hs.app.run(args.host, args.port)
     else:

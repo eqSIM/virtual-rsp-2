@@ -143,12 +143,22 @@ static int send_line(int sockfd, const char *line) {
     return 0;
 }
 
+// Global eUICC state that persists across client connections
+static struct euicc_state global_state;
+static int global_state_initialized = 0;
+
 static void handle_client(int client_fd) {
-    struct euicc_state state;
     char recv_buffer[8192];
     size_t recv_buffer_len = 0;
 
     printf("Client connected\n");
+    
+    // Initialize global state on first use
+    if (!global_state_initialized) {
+        euicc_state_init(&global_state);
+        global_state_initialized = 1;
+        printf("Global eUICC state initialized\n");
+    }
 
     while (keep_running) {
         char *request_line = NULL;
@@ -175,17 +185,17 @@ static void handle_client(int client_fd) {
 
         // Handle request
         if (strcmp(func, "connect") == 0) {
-            ecode = apdu_handle_connect(&state);
+            ecode = apdu_handle_connect(&global_state);
         } else if (strcmp(func, "disconnect") == 0) {
-            ecode = apdu_handle_disconnect(&state);
+            ecode = apdu_handle_disconnect(&global_state);
         } else if (strcmp(func, "logic_channel_open") == 0) {
-            ecode = apdu_handle_logic_channel_open(&state, param, param_len);
+            ecode = apdu_handle_logic_channel_open(&global_state, param, param_len);
         } else if (strcmp(func, "logic_channel_close") == 0) {
             if (param_len > 0) {
-                ecode = apdu_handle_logic_channel_close(&state, param[0]);
+                ecode = apdu_handle_logic_channel_close(&global_state, param[0]);
             }
         } else if (strcmp(func, "transmit") == 0) {
-            ecode = apdu_handle_transmit(&state, &response_data, &response_data_len, param, param_len);
+            ecode = apdu_handle_transmit(&global_state, &response_data, &response_data_len, param, param_len);
         } else {
             fprintf(stderr, "Unknown function: %s\n", func);
             ecode = -1;
