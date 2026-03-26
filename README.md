@@ -1,57 +1,81 @@
-# Virtual Remote SIM Provisioning (Virtual RSP)
+# Virtual RSP
 
-A complete software-based implementation of the GSMA SGP.22 eSIM Remote SIM Provisioning (RSP) stack. This project allows for the simulation of eSIM profile downloads and lifecycle management without physical hardware.
+Software-based GSMA SGP.22 eSIM Remote SIM Provisioning stack. Simulates eSIM profile download and lifecycle management without physical hardware.
 
-## 🚀 Quick Start
+## Components
 
-### 1. Build the Project
-```bash
-cmake -B build && cmake --build build
+| Component | Role |
+|---|---|
+| **v-euicc** | Virtual eUICC daemon (ECDSA-P256 crypto) |
+| **lpac** | Local Profile Assistant (LPA client) |
+| **osmo-smdpp** | SM-DP+ profile server |
+| **nginx** | TLS reverse proxy |
+
+```
+lpac <──socket──> v-euicc-daemon <──HTTPS/ES9+──> nginx <──> osmo-smdpp
 ```
 
-### 2. Configure Environment (One-time)
-```bash
-# Add hosts entry (requires sudo)
-./add-hosts-entry.sh
+## Getting Started (fresh clone)
 
-# Setup Python venv
+```bash
+# 1. One-time system setup (needs sudo password)
+sudo apt install cmake gcc nginx swig libssl-dev python3-venv   # skip if already installed
+echo '127.0.0.1 testsmdpplus1.example.com' | sudo tee -a /etc/hosts
+
+# 2. Run everything
+./test-all.sh
+```
+
+That's it. `test-all.sh` handles the rest:
+- Builds C components (lpac + v-euicc-daemon)
+- Creates Python venv and installs all packages
+- Generates SGP.26 test certificates
+- Syncs CI PKID between certs and C source, rebuilds if needed
+- Starts all services (v-euicc-daemon, osmo-smdpp, nginx)
+- Runs the SGP.22 test suite (chip info, mutual auth, profile download)
+- Tears down all processes on exit
+
+If any system packages are missing, the script tells you exactly what to install.
+
+### Re-running
+
+```bash
+./test-all.sh                # full run (build + setup + test)
+./test-all.sh --skip-build   # reuse existing build artifacts
+./test-all.sh --skip-setup   # reuse existing venv + certs too
+./test-all.sh --tests-only   # fastest re-run (skip build AND setup)
+```
+
+## Manual Setup (if needed)
+
+```bash
+# Build
+cmake -B build -DLPAC_WITH_APDU_PCSC=OFF -DCMAKE_C_FLAGS="-Wno-deprecated-declarations" .
+cmake --build build -j$(nproc)
+
+# Python venv
 python3 -m venv pysim/venv
 source pysim/venv/bin/activate
-pip install -r requirements-mno.txt -r requirements-gui.txt
+pip install -r pysim/requirements.txt
+pip install klein requests
 
-# Generate test certificates
+# Generate certs
 cd pysim && python3 contrib/generate_smdpp_certs.py && cd ..
+
+# Hosts entry
+echo "127.0.0.1 testsmdpplus1.example.com" | sudo tee -a /etc/hosts
+
+# Start services
+./build/v-euicc/v-euicc-daemon 8765 &
+source pysim/venv/bin/activate
+cd pysim && python3 osmo-smdpp.py -H 127.0.0.1 -p 8000 --nossl -c generated &
+nginx -c $PWD/pysim/nginx-smdpp.conf -p $PWD/pysim &
+
+# Test
+LPAC_APDU=socket ./build/lpac/src/lpac chip info
+LPAC_APDU=socket ./build/lpac/src/lpac profile discovery -s testsmdpplus1.example.com:8443
 ```
 
-### 3. Run the Applications
-Choose the interface that fits your role:
+## License
 
-- **Developer**: `./run-gui.sh` (Full stack orchestration & debugging)
-- **MNO Operator**: `./run-mno.sh` (Server metrics & profile warehousing)
-
----
-
-## 📚 Documentation
-
-For detailed technical documentation, please refer to the `docs/` directory:
-
-1.  [**Setup & Configuration**](docs/01-SETUP.md) - Prerequisites and build guide.
-2.  [**Architecture Overview**](docs/02-ARCHITECTURE.md) - How the components interact.
-3.  [**SGP.22 RSP Flow**](docs/03-RSP-FLOW.md) - Step-by-step protocol walkthrough.
-4.  [**v-euicc Internals**](docs/04-V-EUICC.md) - C implementation deep-dive.
-5.  [**Modifications**](docs/05-MODIFICATIONS.md) - Changes to open-source components.
-6.  [**RSP Control Center**](docs/06-GUI-CONTROL-CENTER.md) - Developer GUI walkthrough.
-7.  [**MNO Management Console**](docs/07-GUI-MNO-CONSOLE.md) - Operator GUI walkthrough.
-8.  [**Detailed Demo Script**](docs/08-DEMO-SCRIPT.md) - Walkthrough of `demo-detailed.sh`.
-9.  [**Troubleshooting**](docs/09-TROUBLESHOOTING.md) - Solutions to common issues.
-
-## 🛠️ Main Components
-
-- **v-euicc**: Virtual eSIM daemon with real ECDSA-P256 cryptography.
-- **lpac**: Local Profile Assistant client with a custom socket driver.
-- **osmo-smdpp**: Extended SM-DP+ server with MNO management REST API.
-- **nginx**: Secure TLS proxy for RSP HTTPS traffic.
-
-## 📜 License
-
-See component-specific directories for licensing information.
+See component directories for licensing.
